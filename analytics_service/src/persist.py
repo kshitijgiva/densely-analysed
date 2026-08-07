@@ -28,8 +28,17 @@ from db.postgres import (  # noqa: E402
 
 
 def persist_identities(identities, store_id, camera_id, fps, run_start,
-                        store_name=None, camera_url=None, region=None):
-    """identities: {identity_id: PersonIdentity}, as built by the pipeline scripts."""
+                        store_name=None, camera_url=None, region=None,
+                        require_demographics=True):
+    """identities: {identity_id: PersonIdentity}, as built by the pipeline scripts.
+
+    require_demographics: when True (default), an identity must clear
+    PersonIdentity.is_footfall_eligible()'s confidence gate to be persisted.
+    Pass False for runs where demographics was disabled entirely (e.g.
+    run_demographics=False) - identity.gender is never set in that case, so
+    is_footfall_eligible() would otherwise always be False and silently drop
+    every identity, making footfall look like zero instead of just missing
+    the gender/age fields."""
     upsert_store(
         store_id,
         store=store_name or store_id,
@@ -39,7 +48,7 @@ def persist_identities(identities, store_id, camera_id, fps, run_start,
 
     persisted = 0
     for identity in identities.values():
-        if not identity.is_footfall_eligible():
+        if require_demographics and not identity.is_footfall_eligible():
             continue
 
         person_id = identity.person_id

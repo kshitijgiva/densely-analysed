@@ -49,7 +49,9 @@ def run(video_source, output_path, max_frames, metrics_out_path,
         run_demographics=True, demographics_backend="mivolo-body",
         use_chroma=False, store_id="store_1", camera_id="camera_1",
         sample_frames=0, sample_window_seconds=10, write_video=True,
-        reid_threshold=REID_THRESHOLD):
+        reid_threshold=REID_THRESHOLD,
+        start_frame=0, segment_label=None, log_history=True,
+        heatmap_hex_size=40):
     """reid_threshold defaults to the config value, which was tuned on dense,
     frame-by-frame footage (see validate_pipeline.py) where consecutive
     same-person appearances are captured a fraction of a second apart. When
@@ -88,7 +90,6 @@ def run(video_source, output_path, max_frames, metrics_out_path,
     if not cap.isOpened():
         raise FileNotFoundError(f"Could not open video source: {video_source}")
 
-    start_frame = 0
     if start_frame:
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
 
@@ -118,7 +119,6 @@ def run(video_source, output_path, max_frames, metrics_out_path,
     detections_log = []  # (frame_idx, track_id, embedding, bbox) (M2)
     det_confidences = [] # every YOLO detection confidence seen
     people_per_frame = []
-    heatmap_hex_size = 40
     heatmap_acc = HeatmapAccumulator(width, height, hex_size=heatmap_hex_size)
 
     frame_idx = -1
@@ -135,18 +135,19 @@ def run(video_source, output_path, max_frames, metrics_out_path,
     while max_frames is None or processed_frames < max_frames:
         frame_start = time.time()
         if sample_frames > 0:
-            frame_idx = int(round(next_sample_frame))
+            frame_idx = start_frame + int(round(next_sample_frame))
             if total_frames > 0 and frame_idx >= total_frames:
                 break
             cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
             next_sample_frame += sample_interval
         else:
-            frame_idx = processed_frames
+            frame_idx = start_frame + processed_frames
 
         ret, frame = cap.read()
         if not ret:
             break
         last_source_frame = frame_idx
+        last_raw_frame = frame.copy()  # kept clean, for the final standalone heatmap image
 
         results = detect_people(detection_model, frame)
         official_frame_results = None  # lazily computed, cached per-frame
@@ -249,7 +250,7 @@ def run(video_source, output_path, max_frames, metrics_out_path,
                         identity = PersonIdentity(identity_id, first_seen=frame_idx)
                         identity.add_appearance(features, frame_idx)
                         if gender_result is not None:
-                            video_time = (start_frame + frame_idx) / fps
+                            video_time = frame_idx / fps
                             identity.update_gender(gender_result, video_time)
                             identity.update_age(age_result, video_time)
                         identities[identity_id] = identity
@@ -270,7 +271,7 @@ def run(video_source, output_path, max_frames, metrics_out_path,
             claimed_this_frame.add(identity_id)
 
             if run_demographics:
-                video_time = (start_frame + frame_idx) / fps
+                video_time = frame_idx / fps
                 identity = identities[identity_id]
                 needs_gender, needs_age = needs_demographic_retry(identity, video_time)
                 if needs_gender or needs_age:
@@ -300,6 +301,10 @@ def run(video_source, output_path, max_frames, metrics_out_path,
         proc_fps_ema = instant_fps if proc_fps_ema is None else (0.9 * proc_fps_ema + 0.1 * instant_fps)
 
         if writer is not None:
+            # Live cumulative heatmap, updated with this frame's own detections
+            # (heatmap_acc.add_bbox already ran above) - drawn first so the
+            # boxes/labels/overlay text stay legible on top of it.
+            frame = render_heatmap(frame, heatmap_acc)
             frame = draw_boxes(frame, results, track_id_to_identity, identities)
             overlay_lines = [
                 f"Frame: {frame_idx}" + (f"/{total_frames}" if total_frames > 0 else ""),
@@ -402,6 +407,7 @@ def run(video_source, output_path, max_frames, metrics_out_path,
     heatmap_image_path = base + "_heatmap.png"
     heatmap_data_path = base + "_heatmap.json"
     if heatmap_acc.total_visits() > 0 and last_raw_frame is not None:
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
         heatmap_frame = render_heatmap(last_raw_frame, heatmap_acc)
         cv2.imwrite(heatmap_image_path, heatmap_frame)
         heatmap_acc.save(heatmap_data_path)
@@ -429,11 +435,19 @@ def run(video_source, output_path, max_frames, metrics_out_path,
               f"{demographics_m3['avg_age_confidence']}")
     if writer is not None:
         print(f"Annotated video written to {output_path}")
+    if "image_path" in report["heatmap"]:
+        print(f"Foot-traffic hex heatmap written to {heatmap_image_path} "
+              f"({report['heatmap']['occupied_cells']} occupied cells, "
+              f"{report['heatmap']['total_visits']} visits)")
 
     os.makedirs(os.path.dirname(metrics_out_path), exist_ok=True)
     with open(metrics_out_path, "w") as f:
         json.dump(report, f, indent=2)
     print(f"Metrics report written to {metrics_out_path}")
+
+    if log_history:
+        metrics_store.log_run(report, video_source, segment_label)
+        print(f"Logged to run history: {metrics_store.DB_PATH}")
 
     return {
         "report": report,
@@ -477,6 +491,15 @@ if __name__ == "__main__":
                               "Enabled automatically by --persist.")
     parser.add_argument("--store-id", default="store_1")
     parser.add_argument("--camera-id", default="camera_1")
+    parser.add_argument("--start-frame", type=int, default=0,
+                         help="Seek to this frame before processing - lets you sample different segments of a video")
+    parser.add_argument("--segment-label", default=None,
+                         help="Label for this run in the metrics history (e.g. 'segment-1')")
+    parser.add_argument("--no-history", action="store_true",
+                         help="Don't log this run into metrics_history.db")
+    parser.add_argument("--heatmap-hex-size", type=int, default=40,
+                         help="Circumradius in pixels of each hex cell in the foot-traffic "
+                              "heatmap (smaller = finer-grained). Default: 40")
     args = parser.parse_args()
 
     output_path = os.path.normpath(args.output)
@@ -495,7 +518,11 @@ if __name__ == "__main__":
                  sample_frames=args.sample_frames,
                  sample_window_seconds=args.sample_window_seconds,
                  write_video=not args.no_video,
-                 reid_threshold=args.reid_threshold)
+                 reid_threshold=args.reid_threshold,
+                 start_frame=args.start_frame,
+                 segment_label=args.segment_label,
+                 log_history=not args.no_history,
+                 heatmap_hex_size=args.heatmap_hex_size)
 
     if args.persist:
         from datetime import datetime, timedelta, timezone
@@ -505,6 +532,7 @@ if __name__ == "__main__":
         count = persist_identities(
             result["identities"], args.store_id, args.camera_id, result["fps"],
             run_start=datetime.now(timezone.utc) - timedelta(seconds=video_duration),
+            require_demographics=not args.no_demographics,
         )
         print(
             f"Persisted {count} identities to Postgres and ChromaDB "
