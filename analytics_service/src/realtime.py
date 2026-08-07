@@ -2,7 +2,7 @@ import cv2
 import time
 from detection import load_detection_model, detect_people
 from reid import OSNetReID
-from demographics import estimate_gender_demographics, estimate_age_demographics
+from demographics import estimate_demographics
 from utils import draw_boxes
 from config import VIDEO_SOURCE, REID_THRESHOLD
 from identity import PersonIdentity, match_identity, needs_demographic_retry
@@ -59,16 +59,17 @@ while True:
             
             # Handle demographic retries
             needs_gender, needs_age = needs_demographic_retry(identity, current_time)
-            
-            if needs_gender:
-                gender_demo = estimate_gender_demographics(track_id, person_img)
-                identity.update_gender(gender_demo, current_time)
-                print(f"Gender update: ID {identity_id} - {gender_demo}")
-                
-            if needs_age:
-                age_demo = estimate_age_demographics(track_id, person_img)
-                identity.update_age(age_demo, current_time)
-                print(f"Age update: ID {identity_id} - {age_demo}")
+
+            if needs_gender or needs_age:
+                age_demo, gender_demo = estimate_demographics(person_img)
+
+                if needs_gender:
+                    identity.update_gender(gender_demo, current_time)
+                    print(f"Gender update: ID {identity_id} - {gender_demo}")
+
+                if needs_age:
+                    identity.update_age(age_demo, current_time)
+                    print(f"Age update: ID {identity_id} - {age_demo}")
         
         # New track: find or create identity
         else:
@@ -90,8 +91,7 @@ while True:
                 identity.add_appearance(features, current_time)
                 
                 # Initial demographics
-                gender_demo = estimate_gender_demographics(track_id, person_img)
-                age_demo = estimate_age_demographics(track_id, person_img)
+                age_demo, gender_demo = estimate_demographics(person_img)
                 identity.update_gender(gender_demo, current_time)
                 identity.update_age(age_demo, current_time)
                 
