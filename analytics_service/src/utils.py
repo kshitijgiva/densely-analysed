@@ -28,7 +28,13 @@ def draw_boxes(frame, results, track_id_map, identity_db):
         # Draw bounding box
         color = (0, 255, 0)  # Green for detected person
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-        
+
+        # Detection confidence (from YOLO)
+        if box.conf is not None:
+            det_conf = float(box.conf.item())
+            cv2.putText(frame, f"det: {det_conf:.2f}", (x1, y2 + 15),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1)
+
         # Prepare information text
         info_text = f"Track: {track_id}"
         if identity:

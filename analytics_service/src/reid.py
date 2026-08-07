@@ -6,7 +6,7 @@ import torchreid
 import gdown
 from torchreid import reid_model_factory
 
-from config import REID_MODEL_NAME, REID_MODEL_CHECKPOINT, REID_WEIGHTS_DIR
+from config import REID_MODEL_NAME, REID_MODEL_CHECKPOINT, REID_WEIGHTS_DIR, _select_device
 
 
 class OSNetReID:
@@ -18,7 +18,7 @@ class OSNetReID:
 
     def __init__(self, model_name=REID_MODEL_NAME, checkpoint_name=REID_MODEL_CHECKPOINT,
                  weights_dir=REID_WEIGHTS_DIR):
-        self.device = 'mps' if torch.backends.mps.is_available() else 'cpu'
+        self.device = _select_device()
         self.embedding_dimension = 512
         weights_path = self._ensure_weights(checkpoint_name, weights_dir)
         self.extractor = torchreid.utils.FeatureExtractor(
