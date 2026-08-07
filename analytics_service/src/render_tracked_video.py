@@ -147,6 +147,7 @@ def run(video_source, output_path, max_frames, metrics_out_path,
         if not ret:
             break
         last_source_frame = frame_idx
+        last_raw_frame = frame
 
         results = detect_people(detection_model, frame)
         official_frame_results = None  # lazily computed, cached per-frame
@@ -499,7 +500,7 @@ if __name__ == "__main__":
 
     if args.persist:
         from datetime import datetime, timedelta, timezone
-        from persist import persist_identities
+        from persist import persist_identities, persist_heatmap
 
         video_duration = result["source_duration_seconds"]
         count = persist_identities(
@@ -510,3 +511,15 @@ if __name__ == "__main__":
             f"Persisted {count} identities to Postgres and ChromaDB "
             f"(store={args.store_id}, camera={args.camera_id})"
         )
+
+        heatmap_image_path = result["report"]["heatmap"].get("image_path")
+        if heatmap_image_path:
+            from cloudinary_upload import upload_heatmap
+
+            try:
+                heatmap_url = upload_heatmap(heatmap_image_path, args.store_id, args.camera_id)
+                persist_heatmap(args.store_id, args.camera_id, heatmap_url)
+                print(f"Heatmap uploaded and persisted: {heatmap_url}")
+            except Exception as e:
+                print(f"Warning: heatmap upload/persist failed ({e}); "
+                      f"identities were still persisted above.")
