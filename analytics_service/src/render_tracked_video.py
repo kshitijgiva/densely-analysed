@@ -40,7 +40,13 @@ from validate_pipeline import percentiles, collect_similarity_pairs
 
 def run(video_source, output_path, max_frames, metrics_out_path,
         run_demographics=True, demographics_backend="mivolo-body",
-        use_chroma=False, store_id="store_1", camera_id="camera_1"):
+        use_chroma=False, store_id="store_1", camera_id="camera_1",
+        sample_frames=0, sample_window_seconds=10, write_video=True):
+    if sample_frames < 0:
+        raise ValueError("sample_frames cannot be negative")
+    if sample_frames > 0 and sample_window_seconds <= 0:
+        raise ValueError("sample_window_seconds must be positive")
+
     detection_model = load_detection_model()
     reid_model = OSNetReID()
 
@@ -69,9 +75,17 @@ def run(video_source, output_path, max_frames, metrics_out_path,
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+    sample_interval = 1.0
+    output_fps = fps
+    if sample_frames > 0:
+        output_fps = sample_frames / sample_window_seconds
+        sample_interval = fps / output_fps
+
+    writer = None
+    if write_video:
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        writer = cv2.VideoWriter(output_path, fourcc, output_fps, (width, height))
 
     identities = {}            # {identity_id: PersonIdentity}
     track_id_to_identity = {}  # {track_id: identity_id}
@@ -83,18 +97,31 @@ def run(video_source, output_path, max_frames, metrics_out_path,
     det_confidences = [] # every YOLO detection confidence seen
     people_per_frame = []
 
-    frame_idx = 0
+    frame_idx = -1
+    last_source_frame = -1
+    processed_frames = 0
+    next_sample_frame = 0.0
     new_identity_count = 0
     reid_match_count = 0
     chroma_match_count = 0
     proc_fps_ema = None  # exponential moving average of per-frame processing FPS
     start = time.time()
 
-    while max_frames is None or frame_idx < max_frames:
+    while max_frames is None or processed_frames < max_frames:
         frame_start = time.time()
+        if sample_frames > 0:
+            frame_idx = int(round(next_sample_frame))
+            if total_frames > 0 and frame_idx >= total_frames:
+                break
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            next_sample_frame += sample_interval
+        else:
+            frame_idx = processed_frames
+
         ret, frame = cap.read()
         if not ret:
             break
+        last_source_frame = frame_idx
 
         results = detect_people(detection_model, frame)
         official_frame_results = None  # lazily computed, cached per-frame
@@ -203,30 +230,30 @@ def run(video_source, output_path, max_frames, metrics_out_path,
 
         people_per_frame.append(people_in_frame)
 
-        frame = draw_boxes(frame, results, track_id_to_identity, identities)
-
         frame_proc_time = time.time() - frame_start
         instant_fps = 1.0 / frame_proc_time if frame_proc_time > 0 else 0.0
         proc_fps_ema = instant_fps if proc_fps_ema is None else (0.9 * proc_fps_ema + 0.1 * instant_fps)
 
-        overlay_lines = [
-            f"Frame: {frame_idx}" + (f"/{total_frames}" if total_frames > 0 else ""),
-            f"Proc FPS: {proc_fps_ema:.1f}",
-            f"People in frame: {people_in_frame}",
-            f"Identities so far: {len(identities)}",
-        ]
-        for i, line in enumerate(overlay_lines):
-            cv2.putText(frame, line, (10, 30 + 25 * i),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+        if writer is not None:
+            frame = draw_boxes(frame, results, track_id_to_identity, identities)
+            overlay_lines = [
+                f"Frame: {frame_idx}" + (f"/{total_frames}" if total_frames > 0 else ""),
+                f"Proc FPS: {proc_fps_ema:.1f}",
+                f"People in frame: {people_in_frame}",
+                f"Identities so far: {len(identities)}",
+            ]
+            for i, line in enumerate(overlay_lines):
+                cv2.putText(frame, line, (10, 30 + 25 * i),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            writer.write(frame)
 
-        writer.write(frame)
-
-        frame_idx += 1
-        if frame_idx % 100 == 0:
-            print(f"...processed {frame_idx} frames")
+        processed_frames += 1
+        if processed_frames % 100 == 0:
+            print(f"...processed {processed_frames} sampled frames (source frame {frame_idx})")
 
     cap.release()
-    writer.release()
+    if writer is not None:
+        writer.release()
 
     if chroma is not None:
         for identity in identities.values():
@@ -262,9 +289,15 @@ def run(video_source, output_path, max_frames, metrics_out_path,
         }
 
     report = {
-        "frames_processed": frame_idx,
+        "frames_processed": processed_frames,
+        "last_source_frame": last_source_frame,
+        "sampling": {
+            "frames_per_window": sample_frames or None,
+            "window_seconds": sample_window_seconds if sample_frames else None,
+            "effective_fps": round(output_fps, 3),
+        },
         "elapsed_seconds": round(elapsed, 1),
-        "avg_processing_fps": round(frame_idx / max(elapsed, 1e-9), 2),
+        "avg_processing_fps": round(processed_frames / max(elapsed, 1e-9), 2),
         "detection": {
             "count": len(det_confidences),
             "avg_confidence": round(statistics.mean(det_confidences), 3) if det_confidences else None,
@@ -295,7 +328,10 @@ def run(video_source, output_path, max_frames, metrics_out_path,
     }
 
     print(f"\n=== Run summary ===")
-    print(f"Processed {frame_idx} frames in {elapsed:.1f}s ({report['avg_processing_fps']:.1f} FPS)")
+    print(
+        f"Processed {processed_frames} sampled frames through source frame {last_source_frame} "
+        f"in {elapsed:.1f}s ({report['avg_processing_fps']:.1f} FPS)"
+    )
     print(f"Detections: {report['detection']['count']} "
           f"(avg conf {report['detection']['avg_confidence']}, "
           f"max {report['detection']['max_people_in_a_frame']} people/frame)")
@@ -310,7 +346,8 @@ def run(video_source, output_path, max_frames, metrics_out_path,
               f"age breakdown {demographics_m3['age_group_breakdown']}, "
               f"avg confidence (gender/age) = {demographics_m3['avg_gender_confidence']}/"
               f"{demographics_m3['avg_age_confidence']}")
-    print(f"Annotated video written to {output_path}")
+    if writer is not None:
+        print(f"Annotated video written to {output_path}")
 
     os.makedirs(os.path.dirname(metrics_out_path), exist_ok=True)
     with open(metrics_out_path, "w") as f:
@@ -321,7 +358,8 @@ def run(video_source, output_path, max_frames, metrics_out_path,
         "report": report,
         "identities": identities,
         "fps": fps,
-        "frames_processed": frame_idx,
+        "frames_processed": processed_frames,
+        "source_duration_seconds": max(last_source_frame + 1, 0) / fps,
     }
 
 
@@ -333,6 +371,12 @@ if __name__ == "__main__":
     parser.add_argument("--metrics-out", default=None,
                          help="Where to save the JSON metrics report (default: alongside --output, same basename)")
     parser.add_argument("--max-frames", type=int, default=None)
+    parser.add_argument("--sample-frames", type=int, default=0,
+                         help="Process this many evenly spaced frames per sampling window (0 = every frame)")
+    parser.add_argument("--sample-window-seconds", type=float, default=10,
+                         help="Sampling window size in seconds (used with --sample-frames)")
+    parser.add_argument("--no-video", action="store_true",
+                         help="Do not encode an annotated output video")
     parser.add_argument("--no-demographics", action="store_true",
                          help="Skip age/gender estimation (M3) - faster, M1/M2 tracking only")
     parser.add_argument("--demographics-backend", choices=["mivolo-body", "mivolo-official"],
@@ -361,13 +405,16 @@ if __name__ == "__main__":
                  demographics_backend=args.demographics_backend,
                  use_chroma=args.chroma or args.persist,
                  store_id=args.store_id,
-                 camera_id=args.camera_id)
+                 camera_id=args.camera_id,
+                 sample_frames=args.sample_frames,
+                 sample_window_seconds=args.sample_window_seconds,
+                 write_video=not args.no_video)
 
     if args.persist:
         from datetime import datetime, timedelta, timezone
         from persist import persist_identities
 
-        video_duration = result["frames_processed"] / result["fps"]
+        video_duration = result["source_duration_seconds"]
         count = persist_identities(
             result["identities"], args.store_id, args.camera_id, result["fps"],
             run_start=datetime.now(timezone.utc) - timedelta(seconds=video_duration),
