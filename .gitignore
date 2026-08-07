@@ -14,5 +14,8 @@ data/
 *.pth
 *.pt
 analytics_service/src/weights/
-analytics_service/results/reid_validation_log.csvanalytics_service/hf.token
+analytics_service/results/
+analytics_service/hf.token
 .env
+venv/
+*.mp4

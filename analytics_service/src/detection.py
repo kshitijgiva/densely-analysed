@@ -1,11 +1,9 @@
 from ultralytics import YOLO
-import torch
-from config import TRACKER_CONFIG, MIN_CONFIDENCE
+from config import TRACKER_CONFIG, MIN_CONFIDENCE, _select_device
 
 def load_detection_model():
     """Load YOLO model with device optimization"""
-    device = 'mps' if torch.backends.mps.is_available() else 'cpu'
-    model = YOLO('yolov8n.pt').to(device)
+    model = YOLO('yolov8n.pt').to(_select_device())
     return model
 
 def detect_people(model, frame):
