@@ -5,6 +5,7 @@ import psycopg2
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 
+from chatbot import chat as run_chat
 from db.postgres import (
     fetch_person,
     fetch_store,
@@ -25,6 +26,11 @@ class StoreIn(BaseModel):
     camera_url: str
     region: str
     metadata: Optional[dict] = None
+
+
+class ChatIn(BaseModel):
+    message: str
+    history: Optional[list] = None
 
 
 def _default_window(start: Optional[datetime], end: Optional[datetime]):
@@ -105,3 +111,12 @@ async def store_entry_exit_logs(store_id: str, person_id: Optional[str] = None,
                                  limit: int = Query(default=100, le=1000)):
     start, end = _default_window(start, end)
     return _run_query(list_entry_exit_logs, store_id, person_id, start, end, limit)
+
+
+@app.post("/chat")
+async def chat_endpoint(payload: ChatIn):
+    try:
+        answer, history = run_chat(payload.message, payload.history)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"answer": answer, "history": history}

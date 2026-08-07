@@ -42,6 +42,10 @@ services:
       DB_USER: cctv
       DB_PASSWORD: cctvpass
       DB_PORT: "5432"
+      CHAT_MODE: ${CHAT_MODE:-simple}
+      LITELLM_BASE_URL: ${LITELLM_BASE_URL:-}
+      LITELLM_API_KEY: ${LITELLM_API_KEY:-}
+      LITELLM_MODEL: ${LITELLM_MODEL:-}
     depends_on:
       db:
         condition: service_healthy
