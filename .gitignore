@@ -19,3 +19,4 @@ analytics_service/hf.token
 .env
 venv/
 *.mp4
+*.md
