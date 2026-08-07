@@ -4,8 +4,13 @@ from detection import load_detection_model, detect_people
 from reid import OSNetReID
 from demographics import estimate_demographics
 from utils import draw_boxes
-from config import VIDEO_SOURCE, REID_THRESHOLD
-from identity import PersonIdentity, match_identity, needs_demographic_retry
+from config import VIDEO_SOURCE, REID_THRESHOLD, MIN_DEMOGRAPHICS_CONFIDENCE
+from identity import (
+    PersonIdentity,
+    match_identity,
+    needs_demographic_retry,
+    demographics_pass_threshold,
+)
 
 # Initialize models
 detection_model = load_detection_model()
@@ -63,14 +68,12 @@ while True:
             if needs_gender or needs_age:
                 age_demo, gender_demo = estimate_demographics(person_img)
 
-                if needs_gender:
-                    identity.update_gender(gender_demo, current_time)
+                if needs_gender and identity.update_gender(gender_demo, current_time):
                     print(f"Gender update: ID {identity_id} - {gender_demo}")
 
-                if needs_age:
-                    identity.update_age(age_demo, current_time)
+                if needs_age and identity.update_age(age_demo, current_time):
                     print(f"Age update: ID {identity_id} - {age_demo}")
-        
+
         # New track: find or create identity
         else:
             # Try to match existing identity
@@ -82,20 +85,25 @@ while True:
                 identity.add_appearance(features, current_time)
                 track_id_to_identity[track_id] = matched_id
             else:
-                # Create new identity
+                # Initial demographics gate new IDs (and therefore footfall).
+                age_demo, gender_demo = estimate_demographics(person_img)
+                if not demographics_pass_threshold(gender_demo, age_demo):
+                    print(
+                        f"Skip new identity for track {track_id}: "
+                        f"demographics confidence "
+                        f"{float((gender_demo or {}).get('confidence') or 0):.2f} "
+                        f"< {MIN_DEMOGRAPHICS_CONFIDENCE:.2f}"
+                    )
+                    continue
+
                 identity_id = identity_counter
                 identity_counter += 1
                 identity = PersonIdentity(identity_id)
-                
-                # Add first appearance
+
                 identity.add_appearance(features, current_time)
-                
-                # Initial demographics
-                age_demo, gender_demo = estimate_demographics(person_img)
                 identity.update_gender(gender_demo, current_time)
                 identity.update_age(age_demo, current_time)
-                
-                # Store identity
+
                 identities[identity_id] = identity
                 track_id_to_identity[track_id] = identity_id
                 print(f"New Identity {identity_id}: Gender={gender_demo}, Age={age_demo}")

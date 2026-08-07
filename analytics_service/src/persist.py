@@ -37,7 +37,11 @@ def persist_identities(identities, store_id, camera_id, fps, run_start,
         region=region or "unknown",
     )
 
+    persisted = 0
     for identity in identities.values():
+        if not identity.is_footfall_eligible():
+            continue
+
         person_id = identity.person_id
         first_seen = run_start + timedelta(seconds=identity.first_seen / fps)
         last_seen = run_start + timedelta(seconds=identity.last_seen / fps)
@@ -58,8 +62,9 @@ def persist_identities(identities, store_id, camera_id, fps, run_start,
         )
         insert_entry_exit_event(person_id, store_id, camera_id, "entry", first_seen)
         insert_entry_exit_event(person_id, store_id, camera_id, "exit", last_seen)
+        persisted += 1
 
-    return len(identities)
+    return persisted
 
 
 def persist_significant_frames(events, store_id, camera_id):

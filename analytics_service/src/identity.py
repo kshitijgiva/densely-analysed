@@ -4,6 +4,9 @@ import uuid
 import numpy as np
 from scipy.spatial.distance import cosine
 
+from config import MIN_DEMOGRAPHICS_CONFIDENCE
+
+
 class PersonIdentity:
     def __init__(self, identity_id, first_seen=None, person_id=None):
         self.id = identity_id
@@ -20,7 +23,7 @@ class PersonIdentity:
         self.appearances = []  # List of (features, timestamp)
         self.first_seen = first_seen if first_seen is not None else time.time()
         self.last_seen = self.first_seen
-    
+
     def add_appearance(self, features, timestamp):
         """Add new appearance to history"""
         self.appearances.append((features, timestamp))
@@ -37,18 +40,39 @@ class PersonIdentity:
         centroid = np.mean(features, axis=0)
         norm = np.linalg.norm(centroid)
         return centroid / norm if norm else None
-    
+
+    def is_footfall_eligible(self):
+        """Only high-confidence demographics count toward footfall/new visits."""
+        return (
+            self.gender is not None
+            and self.gender_confidence >= MIN_DEMOGRAPHICS_CONFIDENCE
+        )
+
     def update_gender(self, gender_data, timestamp):
         self.gender_attempts += 1
-        self.gender = gender_data['gender']
-        self.gender_confidence = gender_data['confidence']
         self.last_gender_attempt = timestamp
-    
+        gender = gender_data.get("gender")
+        confidence = float(gender_data.get("confidence") or 0.0)
+        if gender is None or confidence < MIN_DEMOGRAPHICS_CONFIDENCE:
+            return False
+        if self.gender is not None and confidence < self.gender_confidence:
+            return False
+        self.gender = gender
+        self.gender_confidence = confidence
+        return True
+
     def update_age(self, age_data, timestamp):
         self.age_attempts += 1
-        self.age = age_data['age']
-        self.age_confidence = age_data['confidence']
         self.last_age_attempt = timestamp
+        age = age_data.get("age")
+        confidence = float(age_data.get("confidence") or 0.0)
+        if age is None or confidence < MIN_DEMOGRAPHICS_CONFIDENCE:
+            return False
+        if self.age is not None and confidence < self.age_confidence:
+            return False
+        self.age = age
+        self.age_confidence = confidence
+        return True
 
 def match_identity(query_features, identity_db):
     """Match features against all identities in database"""
@@ -72,10 +96,14 @@ def match_identity(query_features, identity_db):
     
     return best_match, best_similarity
 
-def needs_demographic_retry(identity, current_time, 
-                            gender_thresh=0.85, age_thresh=0.7,
+def needs_demographic_retry(identity, current_time,
+                            gender_thresh=None, age_thresh=None,
                             retry_interval=3, max_attempts=3):
     """Check if demographics need retry"""
+    if gender_thresh is None:
+        gender_thresh = MIN_DEMOGRAPHICS_CONFIDENCE
+    if age_thresh is None:
+        age_thresh = MIN_DEMOGRAPHICS_CONFIDENCE
     needs_gender = (
         identity.gender_attempts < max_attempts and
         (
@@ -84,7 +112,7 @@ def needs_demographic_retry(identity, current_time,
              (current_time - identity.last_gender_attempt) >= retry_interval)
         )
     )
-    
+
     needs_age = (
         identity.age_attempts < max_attempts and
         (
@@ -93,5 +121,12 @@ def needs_demographic_retry(identity, current_time,
              (current_time - identity.last_age_attempt) >= retry_interval)
         )
     )
-    
+
     return needs_gender, needs_age
+
+
+def demographics_pass_threshold(gender_demo, age_demo=None):
+    """True when a demographics read is strong enough to mint a new identity."""
+    if not gender_demo or gender_demo.get("gender") is None:
+        return False
+    return float(gender_demo.get("confidence") or 0.0) >= MIN_DEMOGRAPHICS_CONFIDENCE

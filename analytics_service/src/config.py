@@ -15,7 +15,7 @@ def _select_device():
 _REPO_ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
 _ANALYTICS_SERVICE_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
 
-VIDEO_SOURCE = os.path.join(_REPO_ROOT, "data", "raw", "sample_video.mp4")  # Path to CCTV footage
+VIDEO_SOURCE = os.path.join(_REPO_ROOT, "data", "raw", "samplevideo6.mp4")  # Path to CCTV footage
 OUTPUT_CSV = os.path.join(_ANALYTICS_SERVICE_DIR, "results", "analytics_table.csv")  # Output file path
 FRAME_SKIP = 5  # Process every 5th frame for performance
 MIN_CONFIDENCE = 0.5  # Minimum detection confidence
@@ -47,5 +47,7 @@ CHROMADB_TTL_HOURS = int(os.environ.get("CHROMADB_TTL_HOURS", "48"))
 
 AGE_GENDER_MODEL = "MiVOLO"  # iitolstykh/mivolo_v2 via transformers, see demographics.py
 DEMOGRAPHICS_MODEL = "body"  # Options: 'face', 'body', 'hybrid' - only 'body' is implemented
+# Reject weak MiVOLO reads: no new identity / no footfall entry below this.
+MIN_DEMOGRAPHICS_CONFIDENCE = 0.97
 VERTEX_PROJECT_ID = "visual-similarity-459311"
 VERTEX_PROJECT_LOCATION = "us-central1"

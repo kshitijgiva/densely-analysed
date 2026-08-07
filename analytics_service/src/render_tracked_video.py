@@ -30,10 +30,15 @@ import time
 
 import cv2
 
-from config import VIDEO_SOURCE, REID_THRESHOLD
+from config import VIDEO_SOURCE, REID_THRESHOLD, MIN_DEMOGRAPHICS_CONFIDENCE
 from detection import load_detection_model, detect_people
 from reid import OSNetReID
-from identity import PersonIdentity, match_identity, needs_demographic_retry
+from identity import (
+    PersonIdentity,
+    match_identity,
+    needs_demographic_retry,
+    demographics_pass_threshold,
+)
 from utils import draw_boxes
 from validate_pipeline import percentiles, collect_similarity_pairs
 from heatmap import HeatmapAccumulator, render_heatmap
@@ -206,10 +211,46 @@ def run(video_source, output_path, max_frames, metrics_out_path,
                             f"-> identity {identity_id} (sim={chroma_match['similarity']:.3f})"
                         )
                     else:
+                        age_result = gender_result = None
+                        if run_demographics:
+                            if demographics_backend == "mivolo-official":
+                                if official_frame_results is None:
+                                    official_frame_results = (
+                                        mivolo_official.estimate_demographics_for_frame(frame)
+                                    )
+                                match = mivolo_official.match_bbox(
+                                    (x1, y1, x2, y2), official_frame_results
+                                )
+                                if match is None:
+                                    continue
+                                gender_result = {
+                                    "gender": match["gender"],
+                                    "confidence": match["confidence"],
+                                }
+                                age_result = {
+                                    "age": match["age_group"],
+                                    "age_years": match["age_years"],
+                                    "confidence": match["confidence"],
+                                }
+                            else:
+                                age_result, gender_result = estimate_demographics(person_img)
+                            if not demographics_pass_threshold(gender_result, age_result):
+                                print(
+                                    f"[frame {frame_idx}] Skip new identity for track {track_id}: "
+                                    f"demographics confidence "
+                                    f"{float((gender_result or {}).get('confidence') or 0):.2f} "
+                                    f"< {MIN_DEMOGRAPHICS_CONFIDENCE:.2f}"
+                                )
+                                continue
+
                         identity_id = identity_counter
                         identity_counter += 1
                         identity = PersonIdentity(identity_id, first_seen=frame_idx)
                         identity.add_appearance(features, frame_idx)
+                        if gender_result is not None:
+                            video_time = (start_frame + frame_idx) / fps
+                            identity.update_gender(gender_result, video_time)
+                            identity.update_age(age_result, video_time)
                         identities[identity_id] = identity
                         person_id_to_identity[identity.person_id] = identity_id
                         new_identity_count += 1
