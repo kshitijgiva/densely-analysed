@@ -10,7 +10,6 @@ mivolo_image_processor.py) on first load. Reviewed on 2026-08-07: plain PyTorch
 module/config/preprocessing code, no network or filesystem access beyond the
 standard HF cache.
 """
-import cv2
 import torch
 from transformers import AutoConfig, AutoImageProcessor, AutoModelForImageClassification
 
@@ -28,6 +27,7 @@ _model = None
 _processor = None
 _config = None
 _device = None
+_empty_faces_input = None  # cached all-zero face tensor (see estimate_demographics)
 
 
 def _age_to_group(age):
@@ -39,7 +39,7 @@ def _age_to_group(age):
 
 def initialize_demographics_model():
     """Load the MiVOLO v2 model once (lazy, on first use)."""
-    global _model, _processor, _config, _device
+    global _model, _processor, _config, _device, _empty_faces_input
     if _model is not None:
         return
 
@@ -53,6 +53,11 @@ def initialize_demographics_model():
     ).to(_device)
     _model.eval()
     _processor = AutoImageProcessor.from_pretrained(MIVOLO_CHECKPOINT, trust_remote_code=True)
+
+    # Body-only mode never has a real face crop, so every call feeds the same
+    # all-zero "no face" tensor - compute it once here instead of re-running
+    # the processor on it for every single estimate_demographics() call.
+    _empty_faces_input = _processor(images=[None])["pixel_values"].to(dtype=_model.dtype, device=_device)
     print("MiVOLO v2 model loaded successfully")
 
 
@@ -63,19 +68,16 @@ def estimate_demographics(person_img):
     face branch is fed an all-zero tensor (MiVOLO's own preprocessing does this
     for any None entry) and the prediction relies on the body branch alone.
     """
+    if person_img is None or person_img.size == 0 or person_img.shape[0] < 50 or person_img.shape[1] < 25:
+        return {"age": None, "confidence": 0.0}, {"gender": None, "confidence": 0.0}
+
     initialize_demographics_model()
 
-    if person_img is None or person_img.size == 0 or person_img.shape[0] < 50 or person_img.shape[1] < 25:
-        return {"age": None, "age_confidence": 0.0}, {"gender": None, "confidence": 0.0}
-
     try:
-        faces_input = _processor(images=[None])["pixel_values"]
-        body_input = _processor(images=[person_img])["pixel_values"]
-        faces_input = faces_input.to(dtype=_model.dtype, device=_device)
-        body_input = body_input.to(dtype=_model.dtype, device=_device)
+        body_input = _processor(images=[person_img])["pixel_values"].to(dtype=_model.dtype, device=_device)
 
-        with torch.no_grad():
-            output = _model(faces_input=faces_input, body_input=body_input)
+        with torch.inference_mode():
+            output = _model(faces_input=_empty_faces_input, body_input=body_input)
 
         age = round(output.age_output[0].item(), 1)
         gender_prob = output.gender_probs[0].item()
@@ -92,17 +94,3 @@ def estimate_demographics(person_img):
     except Exception as e:
         print(f"Demographics estimation error: {str(e)}")
         return {"age": None, "confidence": 0.0}, {"gender": None, "confidence": 0.0}
-
-
-def estimate_gender_demographics(track_id, full_body_img):
-    """Kept for compatibility with existing call sites (realtime.py). Runs a
-    full MiVOLO forward pass - see estimate_demographics for the combined call."""
-    _, gender_result = estimate_demographics(full_body_img)
-    return gender_result
-
-
-def estimate_age_demographics(track_id, full_body_img):
-    """Kept for compatibility with existing call sites (realtime.py). Runs a
-    full MiVOLO forward pass - see estimate_demographics for the combined call."""
-    age_result, _ = estimate_demographics(full_body_img)
-    return age_result
