@@ -1,104 +1,25 @@
-# NOTE: the HF `iitolstykh/mivolo_v2` model used by demographics.py (M3) imports
-# the `mivolo` package (from https://github.com/WildChlamydia/MiVOLO, not on
-# PyPI) plus `timm` at load time. `mivolo`'s own setup.py hard-pins
-# ultralytics==8.1.0, which conflicts with the ultralytics pin below and is
-# too old for this project's torch version (fails to load .pt checkpoints
-# under torch's newer weights_only=True default). Install it separately, with
-# --no-deps so it doesn't drag that ultralytics pin back in, and
-# --no-build-isolation (its setup.py needs pkg_resources from this env):
-#   pip install --no-deps --no-build-isolation "git+https://github.com/WildChlamydia/MiVOLO.git"
-# run.sh does this automatically. The heavier mivolo-official backend
-# (mivolo_official.py) additionally needs mivolo's own extras - lapx, yt_dlp -
-# plus checkpoints not included in this repo; see that file's docstring.
-absl-py==2.3.0
-astunparse==1.6.3
-beautifulsoup4==4.13.4
-blinker==1.9.0
-certifi==2025.6.15
-charset-normalizer==3.4.2
-chromadb==1.0.9
-click==8.2.1
-contourpy==1.3.2
-cycler==0.12.1
-deepface==0.0.93
-fastapi==0.115.9
-filelock==3.18.0
-fire==0.7.0
-Flask==3.1.1
-flask-cors==6.0.1
-flatbuffers==25.2.10
-fonttools==4.58.4
-fsspec==2025.5.1
-gast==0.6.0
-gdown==5.2.0
-google-pasta==0.2.0
-grpcio==1.73.0
-gunicorn==23.0.0
-h5py==3.14.0
-idna==3.10
-itsdangerous==2.2.0
-Jinja2==3.1.6
-joblib==1.5.1
-keras==3.10.0
-kiwisolver==1.4.8
-lapx==0.9.4  # 'lap' PyPI wheels were broken (no compiled lapjv) on this setup; lapx is a drop-in replacement, same `import lap`
-libclang==18.1.1
-lz4==4.4.4
-Markdown==3.8.2
-markdown-it-py==3.0.0
-MarkupSafe==3.0.2
-matplotlib==3.10.3
-mdurl==0.1.2
-ml_dtypes==0.5.1
-mpmath==1.3.0
-mtcnn==1.0.0
-namex==0.1.0
-networkx==3.4.2
-numpy==2.1.3
-opencv-python==4.11.0.86
-opencv-python-headless==4.9.0.80
-opt_einsum==3.4.0
-optree==0.16.0
-packaging==25.0
-pandas==2.3.0
-pillow==11.2.1
-protobuf==5.29.5
-psutil==7.0.0
-posthog<6  # ChromaDB 1.0.9 telemetry API is incompatible with posthog 6+
-py-cpuinfo==9.0.0
-Pygments==2.19.1
-psycopg2-binary==2.9.12  # for persist.py (M4) writing identities/events to Postgres
-pyparsing==3.2.3
-PySocks==1.7.1
-python-dateutil==2.9.0.post0
-pytz==2025.2
-PyYAML==6.0.2
-requests==2.32.4
-retina-face==0.0.17
-rich==14.0.0
-scipy==1.15.3
-seaborn==0.13.2
-six==1.17.0
-soupsieve==2.7
-sympy==1.14.0
-tensorboard==2.19.0
-tensorboard-data-server==0.7.2
-tensorflow==2.19.0
-tensorflow-io-gcs-filesystem==0.37.1
-termcolor==3.1.0
-tf_keras==2.19.0
-thop==0.1.1.post2209072238
-timm==0.8.13.dev0
-torch==2.7.1
-torchreid==0.2.5
-torchvision==0.22.1
-tqdm==4.67.1
-transformers==5.14.1
-typing_extensions==4.14.0
-tzdata==2025.2
-ultralytics==8.3.156
-ultralytics-thop==2.0.14
-urllib3==2.5.0
-uvicorn==0.34.0
-Werkzeug==3.1.3
-wrapt==1.17.2
+# Core detection/tracking/re-id (M1/M2)
+opencv-python
+numpy
+scipy
+torch
+torchvision
+ultralytics
+gdown
+torchreid
+lap
+tensorboard
+
+# Demographics (M3) - mivolo-body backend (transformers-hosted mivolo_v2)
+# Pinned per https://huggingface.co/iitolstykh/mivolo_v2's own requirements -
+# newer transformers has broken the custom modeling code in testing.
+transformers==4.51.0
+accelerate==1.8.1
+
+# Demographics (M3) - alerts.py (Ollama HTTP client)
+requests
+
+# NOTE: the `mivolo` package (needed for both demographics backends, and for
+# the mivolo-official backend's Detector/MiVOLO classes) is not on PyPI and
+# is NOT installed by this file - see README.md for the exact install
+# command, which needs a setuptools workaround and must run after this file.

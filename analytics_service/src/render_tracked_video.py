@@ -36,6 +36,8 @@ from reid import OSNetReID
 from identity import PersonIdentity, match_identity, needs_demographic_retry
 from utils import draw_boxes
 from validate_pipeline import percentiles, collect_similarity_pairs
+from heatmap import HeatmapAccumulator, render_heatmap
+import metrics_store
 
 
 def run(video_source, output_path, max_frames, metrics_out_path,
@@ -81,6 +83,9 @@ def run(video_source, output_path, max_frames, metrics_out_path,
     if not cap.isOpened():
         raise FileNotFoundError(f"Could not open video source: {video_source}")
 
+    if start_frame:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+
     fps = cap.get(cv2.CAP_PROP_FPS) or 25
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -107,6 +112,7 @@ def run(video_source, output_path, max_frames, metrics_out_path,
     detections_log = []  # (frame_idx, track_id, embedding, bbox) (M2)
     det_confidences = [] # every YOLO detection confidence seen
     people_per_frame = []
+    heatmap_acc = HeatmapAccumulator(width, height, hex_size=heatmap_hex_size)
 
     frame_idx = -1
     last_source_frame = -1
@@ -116,6 +122,7 @@ def run(video_source, output_path, max_frames, metrics_out_path,
     reid_match_count = 0
     chroma_match_count = 0
     proc_fps_ema = None  # exponential moving average of per-frame processing FPS
+    last_raw_frame = None
     start = time.time()
 
     while max_frames is None or processed_frames < max_frames:
@@ -158,6 +165,7 @@ def run(video_source, output_path, max_frames, metrics_out_path,
             stats["last"] = frame_idx
             stats["count"] += 1
             detections_log.append((frame_idx, track_id, features, (x1, y1, x2, y2)))
+            heatmap_acc.add_bbox((x1, y1, x2, y2))
 
             if track_id in track_id_to_identity:
                 identity_id = track_id_to_identity[track_id]
@@ -216,7 +224,7 @@ def run(video_source, output_path, max_frames, metrics_out_path,
                     track_id_to_identity[track_id] = identity_id
 
             if run_demographics:
-                video_time = frame_idx / fps
+                video_time = (start_frame + frame_idx) / fps
                 identity = identities[identity_id]
                 needs_gender, needs_age = needs_demographic_retry(identity, video_time)
                 if needs_gender or needs_age:
@@ -336,7 +344,23 @@ def run(video_source, output_path, max_frames, metrics_out_path,
             "chroma_matches": chroma_match_count,
         },
         "demographics_m3": demographics_m3,
+        "heatmap": {
+            "hex_size": heatmap_acc.hex_size,
+            "occupied_cells": len(heatmap_acc.counts),
+            "total_visits": heatmap_acc.total_visits(),
+            "max_cell_count": heatmap_acc.max_count(),
+        },
     }
+
+    base, _ = os.path.splitext(output_path)
+    heatmap_image_path = base + "_heatmap.png"
+    heatmap_data_path = base + "_heatmap.json"
+    if heatmap_acc.total_visits() > 0 and last_raw_frame is not None:
+        heatmap_frame = render_heatmap(last_raw_frame, heatmap_acc)
+        cv2.imwrite(heatmap_image_path, heatmap_frame)
+        heatmap_acc.save(heatmap_data_path)
+        report["heatmap"]["image_path"] = heatmap_image_path
+        report["heatmap"]["data_path"] = heatmap_data_path
 
     print(f"\n=== Run summary ===")
     print(
