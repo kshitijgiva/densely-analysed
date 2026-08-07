@@ -61,8 +61,6 @@ while True:
             needs_gender, needs_age = needs_demographic_retry(identity, current_time)
 
             if needs_gender or needs_age:
-                # One MiVOLO forward pass returns both age and gender - run it
-                # once even when both are needed, instead of twice.
                 age_demo, gender_demo = estimate_demographics(person_img)
 
                 if needs_gender:
@@ -92,7 +90,7 @@ while True:
                 # Add first appearance
                 identity.add_appearance(features, current_time)
                 
-                # Initial demographics - one forward pass for both age and gender
+                # Initial demographics
                 age_demo, gender_demo = estimate_demographics(person_img)
                 identity.update_gender(gender_demo, current_time)
                 identity.update_age(age_demo, current_time)

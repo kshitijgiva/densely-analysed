@@ -28,6 +28,14 @@ REID_WEIGHTS_DIR = os.path.join(os.path.dirname(__file__), "weights")
 REID_THRESHOLD = 0.94  # Cosine similarity threshold for re-identification, tuned via validate_pipeline.py
                        # (separates same-person p5=0.95 from different-person p95=0.76 on test footage)
 
+# Short-lived cross-process/cross-camera re-identification store.
+CHROMADB_HOST = os.environ.get("CHROMADB_HOST", "localhost")
+CHROMADB_PORT = int(os.environ.get("CHROMADB_PORT", "8000"))
+CHROMADB_TENANT = os.environ.get("CHROMADB_TENANT", "default_tenant")
+CHROMADB_DATABASE = os.environ.get("CHROMADB_DATABASE", "default_database")
+CHROMADB_COLLECTION = os.environ.get("CHROMADB_COLLECTION", "person_reid")
+CHROMADB_TTL_HOURS = int(os.environ.get("CHROMADB_TTL_HOURS", "48"))
+
 AGE_GENDER_MODEL = "MiVOLO"  # iitolstykh/mivolo_v2 via transformers, see demographics.py
 DEMOGRAPHICS_MODEL = "body"  # Options: 'face', 'body', 'hybrid' - only 'body' is implemented
 VERTEX_PROJECT_ID = "visual-similarity-459311"

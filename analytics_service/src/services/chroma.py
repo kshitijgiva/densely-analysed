@@ -1,108 +1,130 @@
+import time
+from typing import Dict, List, Optional
+
 import chromadb
+import numpy as np
 from chromadb.config import Settings
-from typing import List, Dict, Optional
-import chromadb.errors
-from config import CHROMADB_DATABASE, CHROMADB_HOST, CHROMADB_PORT, CHROMADB_TENANT
+
+from config import (
+    CHROMADB_COLLECTION,
+    CHROMADB_DATABASE,
+    CHROMADB_HOST,
+    CHROMADB_PORT,
+    CHROMADB_TENANT,
+    CHROMADB_TTL_HOURS,
+)
+
 
 class ChromaDBClient:
+    """Short-lived OSNet embedding store used for cross-process re-identification."""
+
     def __init__(
-        self, 
-        host: str = CHROMADB_HOST, 
+        self,
+        host: str = CHROMADB_HOST,
         port: int = CHROMADB_PORT,
         tenant: str = CHROMADB_TENANT,
-        database: str = CHROMADB_DATABASE
+        database: str = CHROMADB_DATABASE,
+        collection_name: str = CHROMADB_COLLECTION,
+        ttl_hours: int = CHROMADB_TTL_HOURS,
     ):
-        # Use the HTTP client to connect to the ChromaDB server running in Docker
         self.client = chromadb.HttpClient(
             host=host,
             port=port,
-            settings=Settings()
+            tenant=tenant,
+            database=database,
+            settings=Settings(anonymized_telemetry=False),
         )
-        print(f" connected to {host}:{port}, tenant: {tenant}, database: {database}")
-        # Test the connection
-        # If you need to set tenant/database, uncomment and adjust as needed
-        self.client.set_tenant(tenant)
-        self.client.set_database(database)
+        self.collection_name = collection_name
+        self.ttl_seconds = ttl_hours * 60 * 60
+        self.collection = self.client.get_or_create_collection(
+            collection_name,
+            metadata={"hnsw:space": "cosine"},
+        )
+        print(f"Connected to ChromaDB at {host}:{port} ({collection_name})")
 
-    def get_collection(self, collection_name: str):
-        """Retrieve or create a collection by name."""
-        return self.client.get_or_create_collection(collection_name)
+    @staticmethod
+    def vector_id(person_id: str) -> str:
+        return f"person:{person_id}"
 
-    def search_embeddings(self, collection_name: str, query_embedding: List[float], top_k: int, metadata_filter: dict = None):
-        """Search embeddings in a specific collection."""
-        collection = self.get_collection(collection_name)
-        query_args = {
-            "query_embeddings": [query_embedding],
-            "n_results": top_k,
-            "include": ["metadatas", "distances"]
+    @staticmethod
+    def _embedding_values(embedding) -> List[float]:
+        values = np.asarray(embedding, dtype=np.float32).reshape(-1)
+        norm = np.linalg.norm(values)
+        if norm == 0:
+            raise ValueError("Cannot store a zero-length embedding")
+        return (values / norm).tolist()
+
+    def match_identity(
+        self,
+        embedding,
+        store_id: str,
+        threshold: float,
+        top_k: int = 1,
+    ) -> Optional[Dict]:
+        """Return the best unexpired match, or None when it is below threshold."""
+        if self.collection.count() == 0:
+            return None
+
+        now = int(time.time())
+        result = self.collection.query(
+            query_embeddings=[self._embedding_values(embedding)],
+            n_results=top_k,
+            where={
+                "$and": [
+                    {"store_id": {"$eq": store_id}},
+                    {"expires_at": {"$gt": now}},
+                ]
+            },
+            include=["metadatas", "distances"],
+        )
+        if not result["ids"] or not result["ids"][0]:
+            return None
+
+        distance = float(result["distances"][0][0])
+        similarity = 1.0 - distance
+        if similarity <= threshold:
+            return None
+
+        metadata = result["metadatas"][0][0]
+        return {
+            "vector_id": result["ids"][0][0],
+            "person_id": metadata["person_id"],
+            "similarity": similarity,
+            "metadata": metadata,
         }
-        if metadata_filter:
-            query_args["where"] = metadata_filter  # or "filter", depending on your DB
 
-        return collection.query(**query_args)
-
-    def get_metadata_by_ids(self, collection_name: str, ids: List[str]):
-        """Fetch metadata for a list of IDs from a specific collection."""
-        collection = self.get_collection(collection_name)
-        return collection.get(ids=ids, include=["metadatas"])
-
-    def get_embeddings_by_ids(self, collection_name: str, ids: List[str]):
-        """Fetch embeddings by IDs from a specific collection."""
-        collection = self.get_collection(collection_name)
-        return collection.get(ids=ids, include=["embeddings"])
-
-    def get_item_embeddings(self, collection_name: str, skus: List[str]):
-        """Fetch embeddings and metadata by item_ids if item_id is used as ID."""
-        collection = self.get_collection(collection_name)
-        return collection.get(ids=skus, include=["embeddings", "metadatas"])
-
-
-    def insert_embeddings(self, collection_name: str, ids: List[str], embeddings: List[List[float]], metadatas: List[Dict]):
-        """
-        Insert embeddings into the specified collection.
-        Raises an Exception if the insertion fails.
-        """
-        try:
-            collection = self.get_collection(collection_name)
-            collection.add(
-                ids=ids,
-                embeddings=embeddings,
-                metadatas=metadatas
-            )
-        except Exception as e:
-            raise Exception(f"Failed to insert embeddings into collection '{collection_name}': {e}")
-
-
-    def update__embeddings(self, collection_name: str, ids: List[str], embeddings: Optional[List[List[float]]] = None, metadatas: Optional[List[Dict]] = None):
-        """
-        Updates existing embeddings and/or metadata in the specified collection.
-        """
-        collection = self.get_collection(collection_name)
-        collection.update(
-            ids=ids,
-            embeddings=embeddings,
-            metadatas=metadatas
+    def upsert_identity(
+        self,
+        person_id: str,
+        embedding,
+        store_id: str,
+        camera_id: str,
+        seen_at: Optional[int] = None,
+    ) -> str:
+        """Insert or refresh one representative embedding for a person."""
+        seen_at = seen_at or int(time.time())
+        vector_id = self.vector_id(person_id)
+        self.collection.upsert(
+            ids=[vector_id],
+            embeddings=[self._embedding_values(embedding)],
+            metadatas=[{
+                "person_id": person_id,
+                "store_id": store_id,
+                "camera_id": camera_id,
+                "last_seen_at": seen_at,
+                "expires_at": seen_at + self.ttl_seconds,
+            }],
         )
+        return vector_id
 
-    def reset_collection(self, collection_name: str):
-
-        print(f"all the daatabases {self.client.database}")
-        print(f"all the collections {self.client.list_collections()}")
-        existing_collections = self.client.list_collections()
-        if len(existing_collections) > 0 and hasattr(existing_collections[0], "name"):
-            existing_names = [col.name for col in existing_collections]
-        else:
-            existing_names = existing_collections
-
-        if collection_name in existing_names:
-            try:
-                self.client.delete_collection(collection_name)
-                print(f"Deleted collection: {collection_name}")
-            except chromadb.errors.NotFoundError:
-                print(f"Collection {collection_name} not found when deleting - ignoring")
-
-        print(f"Creating collection: {collection_name}")
-        collection = self.client.create_collection(collection_name)
-        print(f"Created collection: {collection}")
-
-        return collection
+    def purge_expired(self, now: Optional[int] = None) -> int:
+        """Delete embeddings whose application-level TTL has elapsed."""
+        now = now or int(time.time())
+        expired = self.collection.get(
+            where={"expires_at": {"$lte": now}},
+            include=[],
+        )
+        ids = expired["ids"]
+        if ids:
+            self.collection.delete(ids=ids)
+        return len(ids)

@@ -15,6 +15,11 @@ fi
 # Install dependencies
 pip install -r analytics_service/src/requirements.txt
 
+# MiVOLO's own package (needed by demographics.py's M3 model) hard-pins an
+# ultralytics version too old for this project - install it separately,
+# without pulling that pin back in. See the note in requirements.txt.
+pip install --no-deps --no-build-isolation "git+https://github.com/WildChlamydia/MiVOLO.git"
+
 # Create necessary folders
 mkdir -p data/raw
 mkdir -p analytics_service/results
