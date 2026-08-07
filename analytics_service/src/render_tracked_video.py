@@ -39,9 +39,19 @@ from validate_pipeline import percentiles, collect_similarity_pairs
 
 
 def run(video_source, output_path, max_frames, metrics_out_path,
-        run_demographics=True, demographics_backend="mivolo-body"):
+        run_demographics=True, demographics_backend="mivolo-body",
+        use_chroma=False, store_id="store_1", camera_id="camera_1"):
     detection_model = load_detection_model()
     reid_model = OSNetReID()
+
+    chroma = None
+    if use_chroma:
+        from services.chroma import ChromaDBClient
+
+        chroma = ChromaDBClient()
+        purged = chroma.purge_expired()
+        if purged:
+            print(f"Purged {purged} expired ChromaDB embeddings")
 
     mivolo_official = None
     if run_demographics:
@@ -65,6 +75,7 @@ def run(video_source, output_path, max_frames, metrics_out_path,
 
     identities = {}            # {identity_id: PersonIdentity}
     track_id_to_identity = {}  # {track_id: identity_id}
+    person_id_to_identity = {} # {stable UUID: identity_id}
     identity_counter = 1000
 
     track_stats = {}     # track_id -> {"first", "last", "count"} (M1)
@@ -75,6 +86,7 @@ def run(video_source, output_path, max_frames, metrics_out_path,
     frame_idx = 0
     new_identity_count = 0
     reid_match_count = 0
+    chroma_match_count = 0
     proc_fps_ema = None  # exponential moving average of per-frame processing FPS
     start = time.time()
 
@@ -121,13 +133,49 @@ def run(video_source, output_path, max_frames, metrics_out_path,
                     reid_match_count += 1
                     print(f"[frame {frame_idx}] Re-ID: track {track_id} -> identity {identity_id} (sim={similarity:.3f})")
                 else:
-                    identity_id = identity_counter
-                    identity_counter += 1
-                    identities[identity_id] = PersonIdentity(identity_id)
-                    identities[identity_id].add_appearance(features, frame_idx)
+                    chroma_match = None
+                    if chroma is not None:
+                        chroma_match = chroma.match_identity(
+                            features, store_id, REID_THRESHOLD
+                        )
+
+                    if chroma_match is not None:
+                        person_id = chroma_match["person_id"]
+                        identity_id = person_id_to_identity.get(person_id)
+                        if identity_id is None:
+                            identity_id = identity_counter
+                            identity_counter += 1
+                            identities[identity_id] = PersonIdentity(
+                                identity_id, first_seen=frame_idx, person_id=person_id
+                            )
+                            person_id_to_identity[person_id] = identity_id
+                        identity = identities[identity_id]
+                        identity.add_appearance(features, frame_idx)
+                        identity.reid_embedding_ref = chroma_match["vector_id"]
+                        chroma_match_count += 1
+                        print(
+                            f"[frame {frame_idx}] Chroma Re-ID: track {track_id} "
+                            f"-> identity {identity_id} (sim={chroma_match['similarity']:.3f})"
+                        )
+                    else:
+                        identity_id = identity_counter
+                        identity_counter += 1
+                        identity = PersonIdentity(identity_id, first_seen=frame_idx)
+                        identity.add_appearance(features, frame_idx)
+                        identities[identity_id] = identity
+                        person_id_to_identity[identity.person_id] = identity_id
+                        new_identity_count += 1
+                        print(f"[frame {frame_idx}] New identity {identity_id} (track {track_id})")
+
+                    if chroma is not None:
+                        identity = identities[identity_id]
+                        identity.reid_embedding_ref = chroma.upsert_identity(
+                            identity.person_id,
+                            identity.representative_embedding(),
+                            store_id,
+                            camera_id,
+                        )
                     track_id_to_identity[track_id] = identity_id
-                    new_identity_count += 1
-                    print(f"[frame {frame_idx}] New identity {identity_id} (track {track_id})")
 
             if run_demographics:
                 video_time = frame_idx / fps
@@ -180,6 +228,17 @@ def run(video_source, output_path, max_frames, metrics_out_path,
     cap.release()
     writer.release()
 
+    if chroma is not None:
+        for identity in identities.values():
+            representative = identity.representative_embedding()
+            if representative is not None:
+                identity.reid_embedding_ref = chroma.upsert_identity(
+                    identity.person_id,
+                    representative,
+                    store_id,
+                    camera_id,
+                )
+
     elapsed = time.time() - start
     lengths = [s["count"] for s in track_stats.values()]
     fragments = sum(1 for l in lengths if l <= 2)
@@ -230,6 +289,7 @@ def run(video_source, output_path, max_frames, metrics_out_path,
             "unique_persistent_identities": len(identities),
             "new_identities": new_identity_count,
             "reid_merges": reid_match_count,
+            "chroma_matches": chroma_match_count,
         },
         "demographics_m3": demographics_m3,
     }
@@ -257,6 +317,13 @@ def run(video_source, output_path, max_frames, metrics_out_path,
         json.dump(report, f, indent=2)
     print(f"Metrics report written to {metrics_out_path}")
 
+    return {
+        "report": report,
+        "identities": identities,
+        "fps": fps,
+        "frames_processed": frame_idx,
+    }
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -272,6 +339,14 @@ if __name__ == "__main__":
                          default="mivolo-body",
                          help="mivolo-body: transformers mivolo_v2, body-only (default). "
                               "mivolo-official: official repo's own detector + fused face+body model, heavier.")
+    parser.add_argument("--persist", action="store_true",
+                         help="Write resulting identities + entry/exit events to Postgres (M4). "
+                              "Requires the db service from docker-compose.yaml to be reachable.")
+    parser.add_argument("--chroma", action="store_true",
+                         help="Use ChromaDB for short-lived cross-run/cross-camera re-identification. "
+                              "Enabled automatically by --persist.")
+    parser.add_argument("--store-id", default="store_1")
+    parser.add_argument("--camera-id", default="camera_1")
     args = parser.parse_args()
 
     output_path = os.path.normpath(args.output)
@@ -281,6 +356,23 @@ if __name__ == "__main__":
         base, _ = os.path.splitext(output_path)
         metrics_out_path = base + "_metrics.json"
 
-    run(args.input, output_path, args.max_frames, metrics_out_path,
-        run_demographics=not args.no_demographics,
-        demographics_backend=args.demographics_backend)
+    result = run(args.input, output_path, args.max_frames, metrics_out_path,
+                 run_demographics=not args.no_demographics,
+                 demographics_backend=args.demographics_backend,
+                 use_chroma=args.chroma or args.persist,
+                 store_id=args.store_id,
+                 camera_id=args.camera_id)
+
+    if args.persist:
+        from datetime import datetime, timedelta, timezone
+        from persist import persist_identities
+
+        video_duration = result["frames_processed"] / result["fps"]
+        count = persist_identities(
+            result["identities"], args.store_id, args.camera_id, result["fps"],
+            run_start=datetime.now(timezone.utc) - timedelta(seconds=video_duration),
+        )
+        print(
+            f"Persisted {count} identities to Postgres and ChromaDB "
+            f"(store={args.store_id}, camera={args.camera_id})"
+        )

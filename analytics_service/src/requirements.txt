@@ -1,9 +1,22 @@
+# NOTE: the HF `iitolstykh/mivolo_v2` model used by demographics.py (M3) imports
+# the `mivolo` package (from https://github.com/WildChlamydia/MiVOLO, not on
+# PyPI) plus `timm` at load time. `mivolo`'s own setup.py hard-pins
+# ultralytics==8.1.0, which conflicts with the ultralytics pin below and is
+# too old for this project's torch version (fails to load .pt checkpoints
+# under torch's newer weights_only=True default). Install it separately, with
+# --no-deps so it doesn't drag that ultralytics pin back in, and
+# --no-build-isolation (its setup.py needs pkg_resources from this env):
+#   pip install --no-deps --no-build-isolation "git+https://github.com/WildChlamydia/MiVOLO.git"
+# run.sh does this automatically. The heavier mivolo-official backend
+# (mivolo_official.py) additionally needs mivolo's own extras - lapx, yt_dlp -
+# plus checkpoints not included in this repo; see that file's docstring.
 absl-py==2.3.0
 astunparse==1.6.3
 beautifulsoup4==4.13.4
 blinker==1.9.0
 certifi==2025.6.15
 charset-normalizer==3.4.2
+chromadb==1.0.9
 click==8.2.1
 contourpy==1.3.2
 cycler==0.12.1
@@ -27,7 +40,7 @@ Jinja2==3.1.6
 joblib==1.5.1
 keras==3.10.0
 kiwisolver==1.4.8
-lap==0.5.12
+lapx==0.9.4  # 'lap' PyPI wheels were broken (no compiled lapjv) on this setup; lapx is a drop-in replacement, same `import lap`
 libclang==18.1.1
 lz4==4.4.4
 Markdown==3.8.2
@@ -50,8 +63,10 @@ pandas==2.3.0
 pillow==11.2.1
 protobuf==5.29.5
 psutil==7.0.0
+posthog<6  # ChromaDB 1.0.9 telemetry API is incompatible with posthog 6+
 py-cpuinfo==9.0.0
 Pygments==2.19.1
+psycopg2-binary==2.9.12  # for persist.py (M4) writing identities/events to Postgres
 pyparsing==3.2.3
 PySocks==1.7.1
 python-dateutil==2.9.0.post0
@@ -72,6 +87,7 @@ tensorflow-io-gcs-filesystem==0.37.1
 termcolor==3.1.0
 tf_keras==2.19.0
 thop==0.1.1.post2209072238
+timm==0.8.13.dev0
 torch==2.7.1
 torchreid==0.2.5
 torchvision==0.22.1

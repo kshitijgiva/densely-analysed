@@ -1,9 +1,14 @@
 import time
+import uuid
+
+import numpy as np
 from scipy.spatial.distance import cosine
 
 class PersonIdentity:
-    def __init__(self, identity_id):
+    def __init__(self, identity_id, first_seen=None, person_id=None):
         self.id = identity_id
+        self.person_id = person_id or str(uuid.uuid4())
+        self.reid_embedding_ref = None
         self.gender = None
         self.gender_confidence = 0.0
         self.age = None
@@ -11,7 +16,8 @@ class PersonIdentity:
         self.last_gender_attempt = 0
         self.last_age_attempt = 0
         self.appearances = []  # List of (features, timestamp)
-        self.last_seen = time.time()
+        self.first_seen = first_seen if first_seen is not None else time.time()
+        self.last_seen = self.first_seen
     
     def add_appearance(self, features, timestamp):
         """Add new appearance to history"""
@@ -20,6 +26,15 @@ class PersonIdentity:
         # Keep only last 10 appearances
         if len(self.appearances) > 10:
             self.appearances = self.appearances[-10:]
+
+    def representative_embedding(self):
+        """Return an L2-normalized centroid of the retained OSNet appearances."""
+        features = [feature for feature, _ in self.appearances if feature is not None]
+        if not features:
+            return None
+        centroid = np.mean(features, axis=0)
+        norm = np.linalg.norm(centroid)
+        return centroid / norm if norm else None
     
     def update_gender(self, gender_data, timestamp):
         self.gender = gender_data['gender']
