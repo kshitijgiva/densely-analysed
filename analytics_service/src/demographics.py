@@ -66,7 +66,7 @@ def estimate_demographics(person_img):
     initialize_demographics_model()
 
     if person_img is None or person_img.size == 0 or person_img.shape[0] < 50 or person_img.shape[1] < 25:
-        return {"age": None, "age_confidence": 0.0}, {"gender": None, "confidence": 0.0}
+        return {"age": None, "confidence": 0.0}, {"gender": None, "confidence": 0.0}
 
     try:
         faces_input = _processor(images=[None])["pixel_values"]
@@ -92,17 +92,3 @@ def estimate_demographics(person_img):
     except Exception as e:
         print(f"Demographics estimation error: {str(e)}")
         return {"age": None, "confidence": 0.0}, {"gender": None, "confidence": 0.0}
-
-
-def estimate_gender_demographics(track_id, full_body_img):
-    """Kept for compatibility with existing call sites (realtime.py). Runs a
-    full MiVOLO forward pass - see estimate_demographics for the combined call."""
-    _, gender_result = estimate_demographics(full_body_img)
-    return gender_result
-
-
-def estimate_age_demographics(track_id, full_body_img):
-    """Kept for compatibility with existing call sites (realtime.py). Runs a
-    full MiVOLO forward pass - see estimate_demographics for the combined call."""
-    age_result, _ = estimate_demographics(full_body_img)
-    return age_result

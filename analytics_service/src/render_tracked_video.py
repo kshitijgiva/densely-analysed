@@ -39,9 +39,36 @@ from validate_pipeline import percentiles, collect_similarity_pairs
 
 
 def run(video_source, output_path, max_frames, metrics_out_path,
-        run_demographics=True, demographics_backend="mivolo-body"):
+        run_demographics=True, demographics_backend="mivolo-body",
+        use_chroma=False, store_id="store_1", camera_id="camera_1",
+        sample_frames=0, sample_window_seconds=10, write_video=True,
+        reid_threshold=REID_THRESHOLD):
+    """reid_threshold defaults to the config value, which was tuned on dense,
+    frame-by-frame footage (see validate_pipeline.py) where consecutive
+    same-person appearances are captured a fraction of a second apart. When
+    sample_frames > 0, consecutive appearances of the same person are instead
+    seconds apart, so their OSNet similarity is naturally lower - reusing the
+    dense-tracking threshold here causes the same real person to be split
+    into multiple new identities (inflating footfall with no real increase
+    in people). Re-validate with `validate_pipeline.py --sample-frames
+    --sample-window-seconds` matching this run's sampling and pass the
+    suggested threshold in explicitly."""
+    if sample_frames < 0:
+        raise ValueError("sample_frames cannot be negative")
+    if sample_frames > 0 and sample_window_seconds <= 0:
+        raise ValueError("sample_window_seconds must be positive")
+
     detection_model = load_detection_model()
     reid_model = OSNetReID()
+
+    chroma = None
+    if use_chroma:
+        from services.chroma import ChromaDBClient
+
+        chroma = ChromaDBClient()
+        purged = chroma.purge_expired()
+        if purged:
+            print(f"Purged {purged} expired ChromaDB embeddings")
 
     mivolo_official = None
     if run_demographics:
@@ -59,12 +86,21 @@ def run(video_source, output_path, max_frames, metrics_out_path,
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+    sample_interval = 1.0
+    output_fps = fps
+    if sample_frames > 0:
+        output_fps = sample_frames / sample_window_seconds
+        sample_interval = fps / output_fps
+
+    writer = None
+    if write_video:
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        writer = cv2.VideoWriter(output_path, fourcc, output_fps, (width, height))
 
     identities = {}            # {identity_id: PersonIdentity}
     track_id_to_identity = {}  # {track_id: identity_id}
+    person_id_to_identity = {} # {stable UUID: identity_id}
     identity_counter = 1000
 
     track_stats = {}     # track_id -> {"first", "last", "count"} (M1)
@@ -72,17 +108,31 @@ def run(video_source, output_path, max_frames, metrics_out_path,
     det_confidences = [] # every YOLO detection confidence seen
     people_per_frame = []
 
-    frame_idx = 0
+    frame_idx = -1
+    last_source_frame = -1
+    processed_frames = 0
+    next_sample_frame = 0.0
     new_identity_count = 0
     reid_match_count = 0
+    chroma_match_count = 0
     proc_fps_ema = None  # exponential moving average of per-frame processing FPS
     start = time.time()
 
-    while max_frames is None or frame_idx < max_frames:
+    while max_frames is None or processed_frames < max_frames:
         frame_start = time.time()
+        if sample_frames > 0:
+            frame_idx = int(round(next_sample_frame))
+            if total_frames > 0 and frame_idx >= total_frames:
+                break
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            next_sample_frame += sample_interval
+        else:
+            frame_idx = processed_frames
+
         ret, frame = cap.read()
         if not ret:
             break
+        last_source_frame = frame_idx
 
         results = detect_people(detection_model, frame)
         official_frame_results = None  # lazily computed, cached per-frame
@@ -114,20 +164,56 @@ def run(video_source, output_path, max_frames, metrics_out_path,
                 identities[identity_id].add_appearance(features, frame_idx)
             else:
                 matched_id, similarity = match_identity(features, identities)
-                if matched_id is not None and similarity > REID_THRESHOLD:
+                if matched_id is not None and similarity > reid_threshold:
                     identity_id = matched_id
                     identities[identity_id].add_appearance(features, frame_idx)
                     track_id_to_identity[track_id] = identity_id
                     reid_match_count += 1
                     print(f"[frame {frame_idx}] Re-ID: track {track_id} -> identity {identity_id} (sim={similarity:.3f})")
                 else:
-                    identity_id = identity_counter
-                    identity_counter += 1
-                    identities[identity_id] = PersonIdentity(identity_id)
-                    identities[identity_id].add_appearance(features, frame_idx)
+                    chroma_match = None
+                    if chroma is not None:
+                        chroma_match = chroma.match_identity(
+                            features, store_id, reid_threshold
+                        )
+
+                    if chroma_match is not None:
+                        person_id = chroma_match["person_id"]
+                        identity_id = person_id_to_identity.get(person_id)
+                        if identity_id is None:
+                            identity_id = identity_counter
+                            identity_counter += 1
+                            identities[identity_id] = PersonIdentity(
+                                identity_id, first_seen=frame_idx, person_id=person_id
+                            )
+                            person_id_to_identity[person_id] = identity_id
+                        identity = identities[identity_id]
+                        identity.add_appearance(features, frame_idx)
+                        identity.reid_embedding_ref = chroma_match["vector_id"]
+                        chroma_match_count += 1
+                        print(
+                            f"[frame {frame_idx}] Chroma Re-ID: track {track_id} "
+                            f"-> identity {identity_id} (sim={chroma_match['similarity']:.3f})"
+                        )
+                    else:
+                        identity_id = identity_counter
+                        identity_counter += 1
+                        identity = PersonIdentity(identity_id, first_seen=frame_idx)
+                        identity.add_appearance(features, frame_idx)
+                        identities[identity_id] = identity
+                        person_id_to_identity[identity.person_id] = identity_id
+                        new_identity_count += 1
+                        print(f"[frame {frame_idx}] New identity {identity_id} (track {track_id})")
+
+                    if chroma is not None:
+                        identity = identities[identity_id]
+                        identity.reid_embedding_ref = chroma.upsert_identity(
+                            identity.person_id,
+                            identity.representative_embedding(),
+                            store_id,
+                            camera_id,
+                        )
                     track_id_to_identity[track_id] = identity_id
-                    new_identity_count += 1
-                    print(f"[frame {frame_idx}] New identity {identity_id} (track {track_id})")
 
             if run_demographics:
                 video_time = frame_idx / fps
@@ -155,30 +241,41 @@ def run(video_source, output_path, max_frames, metrics_out_path,
 
         people_per_frame.append(people_in_frame)
 
-        frame = draw_boxes(frame, results, track_id_to_identity, identities)
-
         frame_proc_time = time.time() - frame_start
         instant_fps = 1.0 / frame_proc_time if frame_proc_time > 0 else 0.0
         proc_fps_ema = instant_fps if proc_fps_ema is None else (0.9 * proc_fps_ema + 0.1 * instant_fps)
 
-        overlay_lines = [
-            f"Frame: {frame_idx}" + (f"/{total_frames}" if total_frames > 0 else ""),
-            f"Proc FPS: {proc_fps_ema:.1f}",
-            f"People in frame: {people_in_frame}",
-            f"Identities so far: {len(identities)}",
-        ]
-        for i, line in enumerate(overlay_lines):
-            cv2.putText(frame, line, (10, 30 + 25 * i),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+        if writer is not None:
+            frame = draw_boxes(frame, results, track_id_to_identity, identities)
+            overlay_lines = [
+                f"Frame: {frame_idx}" + (f"/{total_frames}" if total_frames > 0 else ""),
+                f"Proc FPS: {proc_fps_ema:.1f}",
+                f"People in frame: {people_in_frame}",
+                f"Identities so far: {len(identities)}",
+            ]
+            for i, line in enumerate(overlay_lines):
+                cv2.putText(frame, line, (10, 30 + 25 * i),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            writer.write(frame)
 
-        writer.write(frame)
-
-        frame_idx += 1
-        if frame_idx % 100 == 0:
-            print(f"...processed {frame_idx} frames")
+        processed_frames += 1
+        if processed_frames % 100 == 0:
+            print(f"...processed {processed_frames} sampled frames (source frame {frame_idx})")
 
     cap.release()
-    writer.release()
+    if writer is not None:
+        writer.release()
+
+    if chroma is not None:
+        for identity in identities.values():
+            representative = identity.representative_embedding()
+            if representative is not None:
+                identity.reid_embedding_ref = chroma.upsert_identity(
+                    identity.person_id,
+                    representative,
+                    store_id,
+                    camera_id,
+                )
 
     elapsed = time.time() - start
     lengths = [s["count"] for s in track_stats.values()]
@@ -203,9 +300,15 @@ def run(video_source, output_path, max_frames, metrics_out_path,
         }
 
     report = {
-        "frames_processed": frame_idx,
+        "frames_processed": processed_frames,
+        "last_source_frame": last_source_frame,
+        "sampling": {
+            "frames_per_window": sample_frames or None,
+            "window_seconds": sample_window_seconds if sample_frames else None,
+            "effective_fps": round(output_fps, 3),
+        },
         "elapsed_seconds": round(elapsed, 1),
-        "avg_processing_fps": round(frame_idx / max(elapsed, 1e-9), 2),
+        "avg_processing_fps": round(processed_frames / max(elapsed, 1e-9), 2),
         "detection": {
             "count": len(det_confidences),
             "avg_confidence": round(statistics.mean(det_confidences), 3) if det_confidences else None,
@@ -221,7 +324,7 @@ def run(video_source, output_path, max_frames, metrics_out_path,
             "fragment_tracks_pct": round(100 * fragments / len(lengths), 1) if lengths else None,
         },
         "reid_m2": {
-            "reid_threshold": REID_THRESHOLD,
+            "reid_threshold": reid_threshold,
             "same_person_pairs": len(same_id_sims),
             "diff_person_pairs": len(diff_id_sims),
             "same_person_sim_p5": same_p[5],
@@ -230,12 +333,16 @@ def run(video_source, output_path, max_frames, metrics_out_path,
             "unique_persistent_identities": len(identities),
             "new_identities": new_identity_count,
             "reid_merges": reid_match_count,
+            "chroma_matches": chroma_match_count,
         },
         "demographics_m3": demographics_m3,
     }
 
     print(f"\n=== Run summary ===")
-    print(f"Processed {frame_idx} frames in {elapsed:.1f}s ({report['avg_processing_fps']:.1f} FPS)")
+    print(
+        f"Processed {processed_frames} sampled frames through source frame {last_source_frame} "
+        f"in {elapsed:.1f}s ({report['avg_processing_fps']:.1f} FPS)"
+    )
     print(f"Detections: {report['detection']['count']} "
           f"(avg conf {report['detection']['avg_confidence']}, "
           f"max {report['detection']['max_people_in_a_frame']} people/frame)")
@@ -250,12 +357,21 @@ def run(video_source, output_path, max_frames, metrics_out_path,
               f"age breakdown {demographics_m3['age_group_breakdown']}, "
               f"avg confidence (gender/age) = {demographics_m3['avg_gender_confidence']}/"
               f"{demographics_m3['avg_age_confidence']}")
-    print(f"Annotated video written to {output_path}")
+    if writer is not None:
+        print(f"Annotated video written to {output_path}")
 
     os.makedirs(os.path.dirname(metrics_out_path), exist_ok=True)
     with open(metrics_out_path, "w") as f:
         json.dump(report, f, indent=2)
     print(f"Metrics report written to {metrics_out_path}")
+
+    return {
+        "report": report,
+        "identities": identities,
+        "fps": fps,
+        "frames_processed": processed_frames,
+        "source_duration_seconds": max(last_source_frame + 1, 0) / fps,
+    }
 
 
 if __name__ == "__main__":
@@ -266,12 +382,31 @@ if __name__ == "__main__":
     parser.add_argument("--metrics-out", default=None,
                          help="Where to save the JSON metrics report (default: alongside --output, same basename)")
     parser.add_argument("--max-frames", type=int, default=None)
+    parser.add_argument("--sample-frames", type=int, default=0,
+                         help="Process this many evenly spaced frames per sampling window (0 = every frame)")
+    parser.add_argument("--sample-window-seconds", type=float, default=10,
+                         help="Sampling window size in seconds (used with --sample-frames)")
+    parser.add_argument("--reid-threshold", type=float, default=REID_THRESHOLD,
+                         help="Cosine similarity threshold for re-identification. The config "
+                              "default is tuned for dense, frame-by-frame tracking - when using "
+                              "--sample-frames, re-validate with validate_pipeline.py using the "
+                              "same sampling and pass the suggested value here.")
+    parser.add_argument("--no-video", action="store_true",
+                         help="Do not encode an annotated output video")
     parser.add_argument("--no-demographics", action="store_true",
                          help="Skip age/gender estimation (M3) - faster, M1/M2 tracking only")
     parser.add_argument("--demographics-backend", choices=["mivolo-body", "mivolo-official"],
                          default="mivolo-body",
                          help="mivolo-body: transformers mivolo_v2, body-only (default). "
                               "mivolo-official: official repo's own detector + fused face+body model, heavier.")
+    parser.add_argument("--persist", action="store_true",
+                         help="Write resulting identities + entry/exit events to Postgres (M4). "
+                              "Requires the db service from docker-compose.yaml to be reachable.")
+    parser.add_argument("--chroma", action="store_true",
+                         help="Use ChromaDB for short-lived cross-run/cross-camera re-identification. "
+                              "Enabled automatically by --persist.")
+    parser.add_argument("--store-id", default="store_1")
+    parser.add_argument("--camera-id", default="camera_1")
     args = parser.parse_args()
 
     output_path = os.path.normpath(args.output)
@@ -281,6 +416,27 @@ if __name__ == "__main__":
         base, _ = os.path.splitext(output_path)
         metrics_out_path = base + "_metrics.json"
 
-    run(args.input, output_path, args.max_frames, metrics_out_path,
-        run_demographics=not args.no_demographics,
-        demographics_backend=args.demographics_backend)
+    result = run(args.input, output_path, args.max_frames, metrics_out_path,
+                 run_demographics=not args.no_demographics,
+                 demographics_backend=args.demographics_backend,
+                 use_chroma=args.chroma or args.persist,
+                 store_id=args.store_id,
+                 camera_id=args.camera_id,
+                 sample_frames=args.sample_frames,
+                 sample_window_seconds=args.sample_window_seconds,
+                 write_video=not args.no_video,
+                 reid_threshold=args.reid_threshold)
+
+    if args.persist:
+        from datetime import datetime, timedelta, timezone
+        from persist import persist_identities
+
+        video_duration = result["source_duration_seconds"]
+        count = persist_identities(
+            result["identities"], args.store_id, args.camera_id, result["fps"],
+            run_start=datetime.now(timezone.utc) - timedelta(seconds=video_duration),
+        )
+        print(
+            f"Persisted {count} identities to Postgres and ChromaDB "
+            f"(store={args.store_id}, camera={args.camera_id})"
+        )

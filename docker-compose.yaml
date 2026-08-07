@@ -1,0 +1,51 @@
+services:
+  db:
+    image: timescale/timescaledb:2.17.2-pg15
+    restart: always
+    environment:
+      POSTGRES_USER: cctv
+      POSTGRES_PASSWORD: cctvpass
+      POSTGRES_DB: cctv_analytics
+    ports:
+      # host-side 5433 avoids clashing with a locally-installed Postgres on 5432;
+      # containers on the compose network (e.g. api) still reach it at db:5432.
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/pg.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cctv -d cctv_analytics"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  chromadb:
+    image: chromadb/chroma:1.0.9
+    ports:
+      - 8000:8000
+    environment:
+      - IS_PERSISTENT=TRUE
+      - PERSIST_DIRECTORY=/data/chroma
+      - ANONYMIZED_TELEMETRY=FALSE
+    volumes:
+      - chroma_data:/data/chroma
+      - ./custom-config.yaml:/config.yaml:ro
+
+  api:
+    build: .
+    restart: always
+    ports:
+      - "8080:8080"
+    environment:
+      DB_HOST: db
+      DB_NAME: cctv_analytics
+      DB_USER: cctv
+      DB_PASSWORD: cctvpass
+      DB_PORT: "5432"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  chroma_data:
