@@ -6,8 +6,18 @@ M2 check: does the cosine-similarity re-id threshold merge broken tracks back
 into the same person without merging two different people together (the
 "did it double count" spot-check)?
 
+Pass --sample-frames/--sample-window-seconds to validate under the same sparse
+sampling render_tracked_video.py/analytics_api.py use for big videos. Same-person
+similarity is measured between *consecutive processed frames*, so validating on
+every frame (the default) only tells you what the threshold should be for
+dense, frame-by-frame tracking (realtime.py) - a few-seconds-apart sample gap
+gives naturally lower same-person similarity (motion, pose, lighting), and
+reusing the dense-tracking threshold there fragments one real person into
+several new identities, inflating footfall with no real increase in people.
+
 Usage:
     python validate_pipeline.py [--max-frames N] [--threshold F]
+    python validate_pipeline.py --sample-frames 3 --sample-window-seconds 10
 
 Outputs a console report plus a per-detection CSV at
 ../results/reid_validation_log.csv for manual spot-checking.
@@ -30,7 +40,12 @@ def cosine_sim(a, b):
     return float((a * b).sum())  # both vectors are L2-normalized by OSNetReID
 
 
-def run(video_source, max_frames, threshold):
+def run(video_source, max_frames, threshold, sample_frames=0, sample_window_seconds=10):
+    if sample_frames < 0:
+        raise ValueError("sample_frames cannot be negative")
+    if sample_frames > 0 and sample_window_seconds <= 0:
+        raise ValueError("sample_window_seconds must be positive")
+
     detection_model = load_detection_model()
     reid_model = OSNetReID()
 
@@ -38,12 +53,29 @@ def run(video_source, max_frames, threshold):
     if not cap.isOpened():
         raise FileNotFoundError(f"Could not open video source: {video_source}")
 
+    fps = cap.get(cv2.CAP_PROP_FPS) or 25
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    sample_interval = 1.0
+    if sample_frames > 0:
+        sample_interval = fps * sample_window_seconds / sample_frames
+        print(f"Sampling {sample_frames} frames per {sample_window_seconds}s "
+              f"(every {sample_interval:.1f} source frames) - matches the sparse-sampling "
+              f"path in render_tracked_video.py/analytics_api.py")
+
     track_stats = {}   # track_id -> {"first": frame_idx, "last": frame_idx, "count": int}
     detections = []    # (frame_idx, track_id, embedding, bbox)
 
     frame_idx = 0
+    processed_frames = 0
+    next_sample_frame = 0.0
     start = time.time()
-    while max_frames is None or frame_idx < max_frames:
+    while max_frames is None or processed_frames < max_frames:
+        if sample_frames > 0:
+            frame_idx = int(round(next_sample_frame))
+            if total_frames > 0 and frame_idx >= total_frames:
+                break
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            next_sample_frame += sample_interval
         ret, frame = cap.read()
         if not ret:
             break
@@ -66,13 +98,15 @@ def run(video_source, max_frames, threshold):
 
             detections.append((frame_idx, track_id, embedding, (x1, y1, x2, y2)))
 
-        frame_idx += 1
-        if frame_idx % 100 == 0:
-            print(f"...processed {frame_idx} frames")
+        processed_frames += 1
+        if sample_frames == 0:
+            frame_idx += 1
+        if processed_frames % 100 == 0:
+            print(f"...processed {processed_frames} frames")
 
     cap.release()
     elapsed = time.time() - start
-    print(f"\nProcessed {frame_idx} frames in {elapsed:.1f}s ({frame_idx / elapsed:.1f} FPS)")
+    print(f"\nProcessed {processed_frames} frames in {elapsed:.1f}s ({processed_frames / elapsed:.1f} FPS)")
 
     report_m1(track_stats)
     same_id_sims, diff_id_sims = collect_similarity_pairs(detections)
@@ -215,8 +249,18 @@ def report_m2_identity_merge(detections, threshold):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument("--video-source", default=VIDEO_SOURCE,
+                         help="File path, RTSP/HTTP stream URL, or webcam index")
     parser.add_argument("--max-frames", type=int, default=None)
     parser.add_argument("--threshold", type=float, default=REID_THRESHOLD)
+    parser.add_argument("--sample-frames", type=int, default=0,
+                         help="Process this many evenly spaced frames per sampling window "
+                              "(0 = every frame). Set to match the analytics_api.py/"
+                              "render_tracked_video.py sampling you're validating.")
+    parser.add_argument("--sample-window-seconds", type=float, default=10,
+                         help="Sampling window size in seconds (used with --sample-frames)")
     args = parser.parse_args()
 
-    run(VIDEO_SOURCE, args.max_frames, args.threshold)
+    run(args.video_source, args.max_frames, args.threshold,
+        sample_frames=args.sample_frames,
+        sample_window_seconds=args.sample_window_seconds)
