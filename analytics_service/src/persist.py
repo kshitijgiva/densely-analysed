@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root, for `
 from db.postgres import (  # noqa: E402
     insert_entry_exit_event,
     insert_significant_frame,
+    upsert_camera_heatmap,
     upsert_person,
     upsert_store,
 )
@@ -65,6 +66,12 @@ def persist_identities(identities, store_id, camera_id, fps, run_start,
         persisted += 1
 
     return persisted
+
+
+def persist_heatmap(store_id, camera_id, image_url):
+    """image_url: a hosted URL (see cloudinary_upload.py), not a local path -
+    /overview reads this straight from Postgres to serve the FE."""
+    upsert_camera_heatmap(store_id, camera_id, image_url)
 
 
 def persist_significant_frames(events, store_id, camera_id):

@@ -77,3 +77,16 @@ CREATE TABLE IF NOT EXISTS significant_frames (
 SELECT create_hypertable('significant_frames', 'event_time', if_not_exists => TRUE);
 CREATE INDEX IF NOT EXISTS idx_significant_frames_store_time ON significant_frames (store_id, event_time DESC);
 CREATE INDEX IF NOT EXISTS idx_significant_frames_store_importance ON significant_frames (store_id, importance_score DESC);
+
+-- Latest foot-traffic heatmap per store/camera, hosted on Cloudinary (see
+-- analytics_service/src/cloudinary_upload.py). One row per (store_id,
+-- camera_id) - each pipeline run overwrites the same Cloudinary asset and
+-- this row, so /overview always serves the most recent heatmap, not a
+-- growing history of them.
+CREATE TABLE IF NOT EXISTS camera_heatmaps (
+    store_id   VARCHAR(64) REFERENCES stores(store_id),
+    camera_id  VARCHAR(64) NOT NULL,
+    image_url  TEXT NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT now(),
+    PRIMARY KEY (store_id, camera_id)
+);
