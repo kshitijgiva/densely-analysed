@@ -71,6 +71,8 @@ def estimate_demographics(person_img):
     if person_img is None or person_img.size == 0 or person_img.shape[0] < 50 or person_img.shape[1] < 25:
         return {"age": None, "confidence": 0.0}, {"gender": None, "confidence": 0.0}
 
+    initialize_demographics_model()
+
     try:
         body_input = _processor(images=[person_img])["pixel_values"].to(dtype=_model.dtype, device=_device)
 

@@ -72,6 +72,7 @@ def run(video_source, output_path, max_frames, metrics_out_path,
     if not cap.isOpened():
         raise FileNotFoundError(f"Could not open video source: {video_source}")
 
+    start_frame = 0
     if start_frame:
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
 
@@ -101,6 +102,7 @@ def run(video_source, output_path, max_frames, metrics_out_path,
     detections_log = []  # (frame_idx, track_id, embedding, bbox) (M2)
     det_confidences = [] # every YOLO detection confidence seen
     people_per_frame = []
+    heatmap_hex_size = 40
     heatmap_acc = HeatmapAccumulator(width, height, hex_size=heatmap_hex_size)
 
     frame_idx = -1
