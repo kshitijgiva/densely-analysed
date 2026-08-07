@@ -177,7 +177,13 @@ async def store_entry_exit_logs(store_id: str, person_id: Optional[str] = None,
 
 
 @app.get("/overview")
-async def overview(store_id: Optional[str] = None, timeframe: str = "1d"):
+async def overview(
+    store_id: Optional[str] = None,
+    store: Optional[str] = None,
+    timeframe: str = "1d",
+):
+    # FE often sends ?store=; accept both, prefer store_id when both are set.
+    store_id = store_id or store
     start, end = _timeframe_window(timeframe)
     calculated_at = datetime.now(timezone.utc)
 

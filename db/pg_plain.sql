@@ -64,3 +64,12 @@ CREATE TABLE IF NOT EXISTS significant_frames (
 );
 CREATE INDEX IF NOT EXISTS idx_significant_frames_store_time ON significant_frames (store_id, event_time DESC);
 CREATE INDEX IF NOT EXISTS idx_significant_frames_store_importance ON significant_frames (store_id, importance_score DESC);
+
+-- Latest foot-traffic heatmap per store/camera (Cloudinary URL).
+CREATE TABLE IF NOT EXISTS camera_heatmaps (
+    store_id   VARCHAR(64) REFERENCES stores(store_id),
+    camera_id  VARCHAR(64) NOT NULL,
+    image_url  TEXT NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT now(),
+    PRIMARY KEY (store_id, camera_id)
+);
