@@ -19,7 +19,12 @@ from datetime import timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root, for `db`
-from db.postgres import insert_entry_exit_event, upsert_person, upsert_store  # noqa: E402
+from db.postgres import (  # noqa: E402
+    insert_entry_exit_event,
+    insert_significant_frame,
+    upsert_person,
+    upsert_store,
+)
 
 
 def persist_identities(identities, store_id, camera_id, fps, run_start,
@@ -55,3 +60,22 @@ def persist_identities(identities, store_id, camera_id, fps, run_start,
         insert_entry_exit_event(person_id, store_id, camera_id, "exit", last_seen)
 
     return len(identities)
+
+
+def persist_significant_frames(events, store_id, camera_id):
+    """events: manifest entries from significant_frames.py's run() - each needs
+    event_time/person_count/motion_ratio/reasons/importance_score/image_path.
+    Only image_path (a URL/path reference) is written to Postgres, not the
+    image itself - see db/pg.sql's note on significant_frames.image_url."""
+    for event in events:
+        insert_significant_frame(
+            store_id=store_id,
+            camera_id=camera_id,
+            event_time=event["event_time"],
+            person_count=event["person_count"],
+            motion_ratio=event["motion_ratio"],
+            reasons=event["reasons"],
+            importance_score=event["importance_score"],
+            image_url=event["image_path"],
+        )
+    return len(events)

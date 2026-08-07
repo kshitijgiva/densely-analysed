@@ -161,6 +161,40 @@ def get_footfall_count(store_id, start_time, end_time):
     return row["footfall"] if row else 0
 
 
+def insert_significant_frame(store_id, camera_id, event_time, person_count,
+                              motion_ratio, reasons, importance_score, image_url):
+    _execute(
+        """
+        INSERT INTO significant_frames (
+            store_id, camera_id, event_time, person_count,
+            motion_ratio, reasons, importance_score, image_url
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s);
+        """,
+        (store_id, camera_id, event_time, person_count,
+         motion_ratio, reasons, importance_score, image_url),
+    )
+
+
+def list_significant_frames(store_id, start_time=None, end_time=None, limit=10):
+    """Highest-importance frames first within the window - the small set of
+    highlights a store dashboard shows, not every frame that was saved."""
+    conditions, params = ["store_id = %s"], [store_id]
+    if start_time:
+        conditions.append("event_time >= %s")
+        params.append(start_time)
+    if end_time:
+        conditions.append("event_time <= %s")
+        params.append(end_time)
+    where = f"WHERE {' AND '.join(conditions)}"
+    params.append(limit)
+    return _execute(
+        f"""SELECT * FROM significant_frames {where}
+            ORDER BY importance_score DESC, event_time DESC LIMIT %s;""",
+        tuple(params), fetch="all",
+    )
+
+
 def get_demographics_breakdown(store_id, start_time, end_time):
     """Gender/age-group counts for persons first seen in the window."""
     gender_rows = _execute(
