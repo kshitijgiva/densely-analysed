@@ -12,6 +12,7 @@ import re
 from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
+from openai import OpenAI
 
 from db.postgres import (
     fetch_stores,
@@ -227,8 +228,6 @@ def _simple_chat(message: str, history=None):
 
 
 def _llm_chat(message, history=None):
-    from openai import OpenAI
-
     if not LITELLM_API_KEY:
         raise RuntimeError("LITELLM_API_KEY is not set for CHAT_MODE=llm")
 
@@ -321,40 +320,43 @@ def _get_client():
     return _client
 
 
-def chat(message, history=None):
-    """Run one user turn through the tool-calling loop. Returns (answer, new_history)."""
-    history = history or []
-    system = {"role": "system", "content": SYSTEM_PROMPT.format(now=datetime.now(timezone.utc).isoformat())}
-    messages = [system] + history + [{"role": "user", "content": message}]
+def _template_narrative(kpis, store_id=None):
+    """Deterministic fallback narrative built directly from the KPI numbers,
+    used when no LiteLLM key is set or the call fails."""
+    footfall = kpis.get("total_footfall") or 0
+    dwell = kpis.get("average_dwell_time_seconds")
+    subject = f"Store {store_id}" if store_id else "The selected stores"
+    parts = [f"{subject} recorded {footfall} visitor{'s' if footfall != 1 else ''}"]
+    if dwell:
+        minutes, seconds = divmod(int(dwell), 60)
+        parts.append(f"averaging {minutes}m {seconds}s per visit")
+    return " ".join(parts) + " in this period."
 
-    for _ in range(MAX_TOOL_ROUNDS):
-        response = client.chat.completions.create(
-            model=LITELLM_MODEL, messages=messages, tools=tools
+
+def generate_narrative(kpis, store_id=None):
+    """One-sentence summary of /overview or /reports KPIs for the AI narrative
+    card. Tries the LiteLLM client; falls back to a templated sentence built
+    straight from the numbers if no key is set or the call fails."""
+    fallback = _template_narrative(kpis, store_id)
+    if not LITELLM_API_KEY:
+        return fallback
+    try:
+        client = _get_client()
+        prompt = (
+            "Write one short, plain-English sentence (max 30 words) summarizing "
+            f"these store analytics KPIs for {store_id or 'the selected stores'}: "
+            f"{json.dumps(kpis, default=str)}. Only use the numbers given - do not "
+            "invent figures that aren't present."
         )
-        choice = response.choices[0].message
-        if not choice.tool_calls:
-            messages.append({"role": "assistant", "content": choice.content})
-            return choice.content, messages[1:]
-
-        messages.append({
-            "role": "assistant",
-            "content": choice.content,
-            "tool_calls": [tc.model_dump() for tc in choice.tool_calls],
-        })
-        for tool_call in choice.tool_calls:
-            name = tool_call.function.name
-            args = json.loads(tool_call.function.arguments or "{}")
-            try:
-                result = dispatch[name](**args)
-            except Exception as e:
-                result = {"error": str(e)}
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tool_call.id,
-                "content": json.dumps(result, default=str),
-            })
-
-    return "Could not finish that — try a narrower question.", messages[1:]
+        response = client.chat.completions.create(
+            model=LITELLM_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=80,
+        )
+        text = response.choices[0].message.content
+        return text.strip() if text else fallback
+    except Exception:
+        return fallback
 
 
 def chat(message, history=None):
