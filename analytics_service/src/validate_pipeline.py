@@ -198,14 +198,14 @@ def report_m2_identity_merge(detections, threshold):
     seen_identities_this_frame = {}
 
     for frame_idx, track_id, embedding, bbox in detections_sorted:
-        seen_identities_this_frame.setdefault(frame_idx, set())
+        claimed = seen_identities_this_frame.setdefault(frame_idx, set())
 
         if track_id in track_id_to_identity:
             identity_id = track_id_to_identity[track_id]
             identities[identity_id].add_appearance(embedding, frame_idx)
             event, similarity = "existing_track", None
         else:
-            matched_id, similarity = match_identity(embedding, identities)
+            matched_id, similarity = match_identity(embedding, identities, exclude_ids=claimed)
             if matched_id is not None and similarity > threshold:
                 identity_id = matched_id
                 identities[identity_id].add_appearance(embedding, frame_idx)

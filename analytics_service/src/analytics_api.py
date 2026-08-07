@@ -23,6 +23,8 @@ if SRC_DIR in sys.path:
     sys.path.remove(SRC_DIR)
 sys.path.insert(0, SRC_DIR)
 
+from config import REID_THRESHOLD_SPARSE  # noqa: E402
+
 SAMPLE_FRAMES = 3
 SAMPLE_WINDOW_SECONDS = 10
 RESULTS_DIR = Path(__file__).resolve().parents[1] / "results" / "jobs"
@@ -43,10 +45,10 @@ class AnalysisRequest(BaseModel):
     reid_threshold: float | None = Field(
         default=None,
         description="Cosine similarity threshold for re-identification. Defaults to "
-        "config.REID_THRESHOLD, which is tuned for dense, frame-by-frame tracking, not "
-        "this endpoint's sparse sampling (SAMPLE_FRAMES per SAMPLE_WINDOW_SECONDS) - re-validate "
-        "with validate_pipeline.py using matching --sample-frames/--sample-window-seconds "
-        "and pass the suggested value here if footfall looks inflated.",
+        "config.REID_THRESHOLD_SPARSE, tuned for this endpoint's sparse sampling "
+        "(SAMPLE_FRAMES per SAMPLE_WINDOW_SECONDS) - re-validate with validate_pipeline.py "
+        "using matching --sample-frames/--sample-window-seconds if footfall still looks "
+        "inflated (or reduced) on your footage, and pass the suggested value here.",
     )
 
 
@@ -75,12 +77,18 @@ def _process_job(job_id: str, request: AnalysisRequest) -> None:
 
     try:
         _update_job(job_id, status="downloading", started_at=datetime.now(timezone.utc))
-        downloaded = gdown.download(
-            url=request.google_drive_url,
-            output=str(input_path),
-            quiet=False,
-            fuzzy=True,
-        )
+        # gdown>=6 always extracts the file ID from share links (fuzzy= removed).
+        try:
+            downloaded = gdown.download(
+                url=request.google_drive_url,
+                output=str(input_path),
+                quiet=False,
+            )
+        except gdown.DownloadError as exc:
+            raise RuntimeError(
+                "Google Drive download failed. Ensure the file is shared as "
+                "'Anyone with the link'."
+            ) from exc
         if not downloaded or not input_path.exists() or input_path.stat().st_size == 0:
             raise RuntimeError(
                 "Google Drive download failed. Ensure the file is shared as "
@@ -101,9 +109,10 @@ def _process_job(job_id: str, request: AnalysisRequest) -> None:
             sample_frames=SAMPLE_FRAMES,
             sample_window_seconds=SAMPLE_WINDOW_SECONDS,
             write_video=False,
+            reid_threshold=request.reid_threshold
+            if request.reid_threshold is not None
+            else REID_THRESHOLD_SPARSE,
         )
-        if request.reid_threshold is not None:
-            run_kwargs["reid_threshold"] = request.reid_threshold
         result = run(**run_kwargs)
 
         _update_job(job_id, status="persisting")

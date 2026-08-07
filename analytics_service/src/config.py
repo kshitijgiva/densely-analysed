@@ -37,6 +37,19 @@ REID_THRESHOLD = 0.94  # Cosine similarity threshold for re-identification, tune
                        # matching your sampling and pass the result via --reid-threshold / the
                        # analysis job's reid_threshold field.
 
+REID_THRESHOLD_SPARSE = 0.85  # Default for analytics_api.py's 3-frames/10s sampling.
+                       # Measured via `validate_pipeline.py --sample-frames 3 --sample-window-seconds 10`
+                       # on data/raw/samplevideo6.mp4: same-person sim p5=0.61, diff-person p95=0.75 -
+                       # the two distributions overlap on this footage, so no single threshold fully
+                       # separates them. 0.85 was chosen from a sweep (with match_identity's same-frame
+                       # exclusion applied - see identity.py) as the point where residual same-frame
+                       # false merges drop to single digits (9/37 tracks) while still resolving some
+                       # fragmentation (37 tracks -> 33 identities); 0.88+ eliminates false merges
+                       # entirely but stops merging fragmented tracks altogether (37 -> 37, no better
+                       # than the dense-tuned 0.94). Re-validate on your own footage/sampling before
+                       # trusting this number, and inspect results/reid_validation_log.csv for
+                       # _FALSE_MERGE rows if footfall still looks wrong.
+
 # Short-lived cross-process/cross-camera re-identification store.
 CHROMADB_HOST = os.environ.get("CHROMADB_HOST", "localhost")
 CHROMADB_PORT = int(os.environ.get("CHROMADB_PORT", "8000"))
@@ -48,6 +61,11 @@ CHROMADB_TTL_HOURS = int(os.environ.get("CHROMADB_TTL_HOURS", "48"))
 AGE_GENDER_MODEL = "MiVOLO"  # iitolstykh/mivolo_v2 via transformers, see demographics.py
 DEMOGRAPHICS_MODEL = "body"  # Options: 'face', 'body', 'hybrid' - only 'body' is implemented
 # Reject weak MiVOLO reads: no new identity / no footfall entry below this.
-MIN_DEMOGRAPHICS_CONFIDENCE = 0.97
+# 0.80 balances recall vs precision on results/demographics_labels.csv (the
+# labeled spot-check set): 0.97 only keeps 48% of real visitors (100%
+# precision) vs 0.80's 86% recall at 83% precision. Was accidentally set to
+# 0.97 in the commit that added tests/test_identity_confidence.py, which
+# still asserts 0.80 - keep this in sync with that test.
+MIN_DEMOGRAPHICS_CONFIDENCE = 0.80
 VERTEX_PROJECT_ID = "visual-similarity-459311"
 VERTEX_PROJECT_LOCATION = "us-central1"

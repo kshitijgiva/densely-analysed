@@ -152,6 +152,7 @@ def run(video_source, output_path, max_frames, metrics_out_path,
         official_frame_results = None  # lazily computed, cached per-frame
 
         people_in_frame = 0
+        claimed_this_frame = set()  # identities already matched to a track in this frame
         for box in results[0].boxes:
             if box.conf is not None:
                 det_confidences.append(float(box.conf.item()))
@@ -178,7 +179,7 @@ def run(video_source, output_path, max_frames, metrics_out_path,
                 identity_id = track_id_to_identity[track_id]
                 identities[identity_id].add_appearance(features, frame_idx)
             else:
-                matched_id, similarity = match_identity(features, identities)
+                matched_id, similarity = match_identity(features, identities, exclude_ids=claimed_this_frame)
                 if matched_id is not None and similarity > reid_threshold:
                     identity_id = matched_id
                     identities[identity_id].add_appearance(features, frame_idx)
@@ -265,6 +266,8 @@ def run(video_source, output_path, max_frames, metrics_out_path,
                             camera_id,
                         )
                     track_id_to_identity[track_id] = identity_id
+
+            claimed_this_frame.add(identity_id)
 
             if run_demographics:
                 video_time = (start_frame + frame_idx) / fps

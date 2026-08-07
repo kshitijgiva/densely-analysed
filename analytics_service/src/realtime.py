@@ -40,7 +40,9 @@ while True:
         continue
 
     results = detect_people(detection_model, frame)
-    
+
+    claimed_this_frame = set()  # identities already matched to a track in this frame
+
     for box in results[0].boxes:
         if not box.id:
             continue
@@ -74,13 +76,16 @@ while True:
                 if needs_age and identity.update_age(age_demo, current_time):
                     print(f"Age update: ID {identity_id} - {age_demo}")
 
+            claimed_this_frame.add(identity_id)
+
         # New track: find or create identity
         else:
             # Try to match existing identity
-            matched_id, similarity = match_identity(features, identities)
+            matched_id, similarity = match_identity(features, identities, exclude_ids=claimed_this_frame)
 
             if matched_id and similarity > REID_THRESHOLD:  # Re-identification threshold
                 print(f"Re-ID: Track {track_id} → Identity {matched_id} (sim={similarity:.2f})")
+                identity_id = matched_id
                 identity = identities[matched_id]
                 identity.add_appearance(features, current_time)
                 track_id_to_identity[track_id] = matched_id
@@ -107,6 +112,8 @@ while True:
                 identities[identity_id] = identity
                 track_id_to_identity[track_id] = identity_id
                 print(f"New Identity {identity_id}: Gender={gender_demo}, Age={age_demo}")
+
+            claimed_this_frame.add(identity_id)
     
     # Visualization
     frame = draw_boxes(frame, results, track_id_to_identity, identities)

@@ -74,15 +74,22 @@ class PersonIdentity:
         self.age_confidence = confidence
         return True
 
-def match_identity(query_features, identity_db):
-    """Match features against all identities in database"""
+def match_identity(query_features, identity_db, exclude_ids=None):
+    """Match features against all identities in database.
+
+    exclude_ids skips identities already claimed by another track visible in
+    the current frame - two simultaneously-visible boxes can never be the
+    same person, so letting them compete for the same identity is always a
+    false merge, independent of the similarity threshold."""
     best_match = None
     best_similarity = -1
-    
+
     if query_features is None:
         return None, -1
-    
+
     for identity_id, identity in identity_db.items():
+        if exclude_ids and identity_id in exclude_ids:
+            continue
         for features, _ in identity.appearances:
             if features is None:
                 continue
