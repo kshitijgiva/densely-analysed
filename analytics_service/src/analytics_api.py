@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 
 import gdown
 from fastapi import FastAPI, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 SRC_DIR = str(Path(__file__).resolve().parent)
@@ -31,6 +32,19 @@ RESULTS_DIR = Path(__file__).resolve().parents[1] / "results" / "jobs"
 MAX_WORKERS = int(os.environ.get("ANALYTICS_MAX_WORKERS", "1"))
 
 app = FastAPI(title="CCTV Video Analysis Jobs API")
+
+_CORS_RAW = os.environ.get("CORS_ORIGINS", "*").strip()
+_CORS_ALLOW_ALL = _CORS_RAW == "*"
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"] if _CORS_ALLOW_ALL else [
+        origin.strip() for origin in _CORS_RAW.split(",") if origin.strip()
+    ],
+    allow_credentials=not _CORS_ALLOW_ALL,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
 jobs = {}
 jobs_lock = threading.Lock()
