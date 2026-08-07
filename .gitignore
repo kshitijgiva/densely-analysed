@@ -17,6 +17,7 @@ analytics_service/src/weights/
 analytics_service/results/
 analytics_service/hf.token
 .env
+railway.env.json
 venv/
 *.mp4
 *.md
