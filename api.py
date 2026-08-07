@@ -6,10 +6,12 @@ from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 
 from chatbot import chat as run_chat
+from chatbot import run_visual_search
 from db.postgres import (
     fetch_person,
     fetch_store,
     fetch_stores,
+    get_average_dwell_time,
     get_demographics_breakdown,
     get_footfall_count,
     list_entry_exit_logs,
@@ -31,6 +33,14 @@ class StoreIn(BaseModel):
 class ChatIn(BaseModel):
     message: str
     history: Optional[list] = None
+
+
+class VisualSearchIn(BaseModel):
+    query: str
+    store_id: Optional[str] = None
+    start: Optional[datetime] = None
+    end: Optional[datetime] = None
+    top_k: int = 5
 
 
 def _default_window(start: Optional[datetime], end: Optional[datetime]):
@@ -90,6 +100,13 @@ async def store_demographics(store_id: str, start: Optional[datetime] = None, en
     return {"store_id": store_id, "start": start, "end": end, **breakdown}
 
 
+@app.get("/stores/{store_id}/dwell-time")
+async def store_dwell_time(store_id: str, start: Optional[datetime] = None, end: Optional[datetime] = None):
+    start, end = _default_window(start, end)
+    stats = _run_query(get_average_dwell_time, store_id, start, end)
+    return {"store_id": store_id, "start": start, "end": end, **stats}
+
+
 @app.get("/stores/{store_id}/persons")
 async def store_persons(store_id: str, start: Optional[datetime] = None, end: Optional[datetime] = None,
                          limit: int = Query(default=100, le=1000)):
@@ -120,3 +137,14 @@ async def chat_endpoint(payload: ChatIn):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     return {"answer": answer, "history": history}
+
+
+@app.post("/visual-search")
+async def visual_search_endpoint(payload: VisualSearchIn):
+    """Semantic appearance search (CLIP) with thumbnails - see chatbot.py's
+    search_visual tool for the text-answer version without thumbnails."""
+    try:
+        results = run_visual_search(payload.query, payload.store_id, payload.start, payload.end, payload.top_k)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"query": payload.query, "results": results}

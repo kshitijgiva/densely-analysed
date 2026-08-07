@@ -46,6 +46,8 @@ services:
       LITELLM_BASE_URL: ${LITELLM_BASE_URL:-}
       LITELLM_API_KEY: ${LITELLM_API_KEY:-}
       LITELLM_MODEL: ${LITELLM_MODEL:-}
+      CHROMADB_HOST: chromadb
+      CHROMADB_PORT: "8000"
     depends_on:
       db:
         condition: service_healthy

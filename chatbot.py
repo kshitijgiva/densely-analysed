@@ -1,20 +1,26 @@
 """
-Natural-language chat over CCTV analytics data — no external LLM required.
+Natural-language chat over CCTV analytics data.
 
-Default mode is a small keyword/intent router that calls the same Postgres
-helpers as api.py (footfall, demographics, persons, entry/exit, stores).
-Optional LiteLLM tool-calling is available with CHAT_MODE=llm if your proxy
-is reachable; it is not needed for the /chat endpoint to work.
+Default mode (CHAT_MODE=simple) is a small keyword/intent router that calls
+the same Postgres helpers as api.py (footfall, demographics, dwell-time,
+persons, entry/exit, stores) - no external LLM required.
+
+Optional mode (CHAT_MODE=llm) runs a tool-calling loop against a LiteLLM
+proxy, using the same helper functions as tools rather than raw SQL. If the
+proxy is unreachable, /chat falls back to simple mode rather than failing.
 """
 import json
 import os
 import re
+import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from dotenv import load_dotenv
 
 from db.postgres import (
     fetch_stores,
+    get_average_dwell_time,
     get_demographics_breakdown,
     get_footfall_count,
     list_entry_exit_logs,
@@ -22,6 +28,11 @@ from db.postgres import (
 )
 
 load_dotenv()
+
+# CLIP + the visual-search Chroma collection live in analytics_service/src
+# (same code that ingests them from the pipeline) - reach them the same way
+# persist.py reaches `db` from the other side.
+sys.path.insert(0, str(Path(__file__).resolve().parent / "analytics_service" / "src"))
 
 CHAT_MODE = os.environ.get("CHAT_MODE", "simple").lower()  # simple | llm
 LITELLM_BASE_URL = os.environ.get("LITELLM_BASE_URL", "https://litellm.internal.givadiva.co")
@@ -33,6 +44,11 @@ _STORE_RE = re.compile(r"\b(store[_-]?[a-z0-9]+)\b", re.I)
 _IDENTIFY_RE = re.compile(
     r"\b(who is|identify|name of|track this person|find this person|facial)\b",
     re.I,
+)
+_DWELL_RE = re.compile(r"\b(dwell|time spent|how long|visit duration|time in store)\b", re.I)
+_VISUAL_TRIGGER_RE = re.compile(r"\b(find|show|search for|look for|looking for)\b", re.I)
+_VISUAL_DESC_RE = re.compile(
+    r"\b(wearing|dressed|carrying|holding|colou?r|shirt|jacket|clothing|outfit|hat|bag)\b", re.I
 )
 
 
@@ -84,17 +100,61 @@ def _fmt_breakdown(label, mapping):
     return ", ".join(parts)
 
 
+def _fmt_duration(seconds):
+    if seconds is None:
+        return "n/a"
+    minutes, secs = divmod(round(seconds), 60)
+    return f"{minutes}m {secs}s" if minutes else f"{secs}s"
+
+
+def _fmt_dwell(store_id, start, end, stats):
+    if not stats or not stats.get("sample_size"):
+        return f"No completed visits for {store_id} between {start.isoformat()} and {end.isoformat()}."
+    return (
+        f"Average time spent at {store_id} from {start.isoformat()} to {end.isoformat()}: "
+        f"{_fmt_duration(stats['avg_seconds'])} "
+        f"(median {_fmt_duration(stats['median_seconds'])}, "
+        f"min {_fmt_duration(stats['min_seconds'])}, max {_fmt_duration(stats['max_seconds'])}, "
+        f"n={stats['sample_size']} visits)."
+    )
+
+
 def _simple_chat(message: str, history=None):
     history = history or []
     text = (message or "").strip()
     if not text:
-        return "Ask about stores, footfall, demographics, persons, or entry/exit logs.", history
+        return "Ask about stores, footfall, demographics, dwell time, persons, or entry/exit logs.", history
 
     if _IDENTIFY_RE.search(text):
         answer = (
-            "I only answer aggregate analytics (footfall, demographics, visit counts). "
+            "I only answer aggregate analytics (footfall, demographics, visit counts, dwell time). "
             "Identifying or naming individuals is out of scope."
         )
+        history = history + [
+            {"role": "user", "content": text},
+            {"role": "assistant", "content": answer},
+        ]
+        return answer, history
+
+    if _VISUAL_TRIGGER_RE.search(text) and _VISUAL_DESC_RE.search(text):
+        store_id = _resolve_store_id(text)
+        try:
+            matches = run_visual_search(text, store_id=store_id, top_k=5)
+        except Exception as e:
+            answer = f"Visual search unavailable: {e}"
+        else:
+            if not matches:
+                answer = "No matching visits found (only visits captured with visual search enabled are searchable)."
+            else:
+                lines = [
+                    f"- {m['similarity']:.2f} similarity, store={m['store_id']}, "
+                    f"camera={m['camera_id']}, seen at {datetime.fromtimestamp(m['seen_at'], tz=timezone.utc).isoformat()}"
+                    for m in matches
+                ]
+                answer = (
+                    "Possible matches (ranked by appearance similarity, not exact - "
+                    "thumbnails available via POST /visual-search):\n" + "\n".join(lines)
+                )
         history = history + [
             {"role": "user", "content": text},
             {"role": "assistant", "content": answer},
@@ -130,23 +190,9 @@ def _simple_chat(message: str, history=None):
     needs_store = store_id is not None or any(
         k in lower
         for k in (
-            "footfall",
-            "visitor",
-            "visitors",
-            "unique",
-            "demographic",
-            "gender",
-            "female",
-            "male",
-            "women",
-            "men",
-            "age",
-            "person",
-            "entry",
-            "exit",
-            "log",
-            "came",
-            "how many",
+            "footfall", "visitor", "visitors", "unique", "demographic", "gender",
+            "female", "male", "women", "men", "age", "person", "entry", "exit",
+            "log", "came", "how many", "dwell", "time spent", "how long",
         )
     )
     if needs_store and not store_id:
@@ -159,7 +205,10 @@ def _simple_chat(message: str, history=None):
         ]
         return answer, history
 
-    if gender_focus or any(
+    if _DWELL_RE.search(text):
+        stats = get_average_dwell_time(store_id, start, end)
+        answer = _fmt_dwell(store_id, start, end, stats)
+    elif gender_focus or any(
         k in lower for k in ("demographic", "gender", "age breakdown", "age group", "age")
     ):
         data = get_demographics_breakdown(store_id, start, end)
@@ -180,13 +229,8 @@ def _simple_chat(message: str, history=None):
     elif any(
         k in lower
         for k in (
-            "footfall",
-            "unique visitor",
-            "how many visitor",
-            "visitor count",
-            "how many people",
-            "how many came",
-            "people came",
+            "footfall", "unique visitor", "how many visitor", "visitor count",
+            "how many people", "how many came", "people came",
         )
     ):
         count = get_footfall_count(store_id, start, end)
@@ -214,9 +258,9 @@ def _simple_chat(message: str, history=None):
         )
     else:
         answer = (
-            "I can answer: stores, footfall, demographics (gender/age), persons, "
-            "or entry/exit logs. Example: \"footfall for store2 today\" or "
-            "\"gender breakdown for store2\"."
+            "I can answer: stores, footfall, demographics (gender/age), dwell time, "
+            "persons, or entry/exit logs. Example: \"footfall for store2 today\" or "
+            "\"average time spent at store2 this week\"."
         )
 
     history = history + [
@@ -226,88 +270,219 @@ def _simple_chat(message: str, history=None):
     return answer, history
 
 
-def _llm_chat(message, history=None):
-    from openai import OpenAI
+SYSTEM_PROMPT = """You are an analytics assistant for a store CCTV footfall/demographics system.
 
-    if not LITELLM_API_KEY:
-        raise RuntimeError("LITELLM_API_KEY is not set for CHAT_MODE=llm")
+Data model:
+- Each "person" row is one re-identified VISIT, not a named individual - gender
+  and age_group are model estimates with a confidence score, never verified
+  identity. Never refer to a person by name or imply identification.
+- "footfall" = count of distinct persons with an 'entry' event in a time window.
+- "dwell time" / "time spent" = last_seen - first_seen per visit, store-level
+  only (no per-zone breakdown yet).
+- search_visual matches by CLIP appearance similarity, not exact attributes -
+  present results as "possible matches, ranked by similarity", not certainties,
+  and note that only visits captured with visual search enabled are covered.
+- All timestamps are UTC. The current UTC time is {now}.
+- Only answer using the tool results you get back - never invent numbers.
+- If a question needs a store_id you don't already have, call list_stores first.
+- If asked to identify, name, or track a specific individual beyond aggregate
+  stats, decline - that's outside this system's scope by design.
 
-    history = history or []
-    system = {
-        "role": "system",
-        "content": (
-            "You are an analytics assistant for store CCTV footfall/demographics. "
-            f"Current UTC time is {datetime.now(timezone.utc).isoformat()}. "
-            "Only use tool results. Never invent numbers. Never identify individuals."
-        ),
-    }
-    tools = [
-        {
-            "type": "function",
-            "function": {
-                "name": "list_stores",
-                "description": "List stores",
-                "parameters": {"type": "object", "properties": {}},
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "get_footfall",
-                "description": "Unique footfall for a store",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "store_id": {"type": "string"},
-                        "start": {"type": "string"},
-                        "end": {"type": "string"},
-                    },
-                    "required": ["store_id"],
+Answer conversationally and cite the actual numbers the tools returned.
+"""
+
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search_visual",
+            "description": (
+                "Semantic appearance search: find visits matching a free-text visual "
+                "description (e.g. 'a person wearing a red jacket'), via CLIP embeddings "
+                "over recent visit thumbnails (only visits captured with visual search "
+                "enabled, within VISUAL_SEARCH_TTL_DAYS, are searchable). Off-the-shelf "
+                "CLIP on low-res CCTV crops - treat similarity as a coarse ranking signal, "
+                "not a precise attribute match."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Visual description to search for"},
+                    "store_id": {"type": "string"},
+                    "start": {"type": "string"},
+                    "end": {"type": "string"},
+                    "top_k": {"type": "integer", "default": 5},
                 },
+                "required": ["query"],
             },
         },
-        {
-            "type": "function",
-            "function": {
-                "name": "get_demographics",
-                "description": "Gender/age breakdown for a store",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "store_id": {"type": "string"},
-                        "start": {"type": "string"},
-                        "end": {"type": "string"},
-                    },
-                    "required": ["store_id"],
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_stores",
+            "description": "List all stores/cameras configured in the system (store_id, name, region).",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_footfall",
+            "description": "Unique footfall (distinct visitors) for a store in a time window.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "store_id": {"type": "string"},
+                    "start": {"type": "string", "description": "ISO8601 UTC datetime; defaults to 24h before end"},
+                    "end": {"type": "string", "description": "ISO8601 UTC datetime; defaults to now"},
                 },
+                "required": ["store_id"],
             },
         },
-    ]
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_demographics",
+            "description": "Gender and age-group breakdown of visitors for a store in a time window.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "store_id": {"type": "string"},
+                    "start": {"type": "string"},
+                    "end": {"type": "string"},
+                },
+                "required": ["store_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_dwell_time",
+            "description": "Average/median/min/max time spent per visit (store-level) in a time window.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "store_id": {"type": "string"},
+                    "start": {"type": "string"},
+                    "end": {"type": "string"},
+                },
+                "required": ["store_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_persons",
+            "description": "List individual visit records (person rows) for a store in a time window.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "store_id": {"type": "string"},
+                    "start": {"type": "string"},
+                    "end": {"type": "string"},
+                    "limit": {"type": "integer", "default": 50},
+                },
+                "required": ["store_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_entry_exit_logs",
+            "description": "List raw entry/exit/zone events for a store (optionally filtered to one person_id).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "store_id": {"type": "string"},
+                    "person_id": {"type": "string"},
+                    "start": {"type": "string"},
+                    "end": {"type": "string"},
+                    "limit": {"type": "integer", "default": 50},
+                },
+                "required": ["store_id"],
+            },
+        },
+    },
+]
 
-    def _window(start, end):
-        end_dt = datetime.fromisoformat(end) if end else datetime.now(timezone.utc)
-        start_dt = datetime.fromisoformat(start) if start else end_dt - timedelta(hours=24)
-        return start_dt, end_dt
 
-    dispatch = {
-        "list_stores": lambda: fetch_stores(),
-        "get_footfall": lambda store_id, start=None, end=None: (
-            lambda s, e: {
-                "store_id": store_id,
-                "start": s.isoformat(),
-                "end": e.isoformat(),
-                "footfall": get_footfall_count(store_id, s, e),
-            }
-        )(*_window(start, end)),
-        "get_demographics": lambda store_id, start=None, end=None: (
-            lambda s, e: {
-                "store_id": store_id,
-                "start": s.isoformat(),
-                "end": e.isoformat(),
-                **get_demographics_breakdown(store_id, s, e),
-            }
-        )(*_window(start, end)),
-    }
+def _window(start, end):
+    end_dt = datetime.fromisoformat(end) if end else datetime.now(timezone.utc)
+    start_dt = datetime.fromisoformat(start) if start else end_dt - timedelta(hours=24)
+    return start_dt, end_dt
+
+
+def _tool_get_footfall(store_id, start=None, end=None):
+    s, e = _window(start, end)
+    return {"store_id": store_id, "start": s.isoformat(), "end": e.isoformat(),
+            "footfall": get_footfall_count(store_id, s, e)}
+
+
+def _tool_get_demographics(store_id, start=None, end=None):
+    s, e = _window(start, end)
+    return {"store_id": store_id, "start": s.isoformat(), "end": e.isoformat(),
+            **get_demographics_breakdown(store_id, s, e)}
+
+
+def _tool_get_dwell_time(store_id, start=None, end=None):
+    s, e = _window(start, end)
+    return {"store_id": store_id, "start": s.isoformat(), "end": e.isoformat(),
+            **get_average_dwell_time(store_id, s, e)}
+
+
+def _tool_list_persons(store_id, start=None, end=None, limit=50):
+    s, e = _window(start, end)
+    return list_persons(store_id, s, e, limit)
+
+
+def _tool_list_entry_exit_logs(store_id, person_id=None, start=None, end=None, limit=50):
+    s, e = _window(start, end)
+    return list_entry_exit_logs(store_id, person_id, s, e, limit)
+
+
+_visual_client = None
+
+
+def run_visual_search(query, store_id=None, start=None, end=None, top_k=5):
+    """Full results, including thumbnails - used by the /visual-search endpoint
+    directly and (with thumbnails stripped) by the chatbot tool below.
+    Loads CLIP + connects to Chroma lazily, only when a visual search actually runs."""
+    global _visual_client
+    import visual_embeddings
+    from services.visual_search import VisualSearchClient
+
+    if _visual_client is None:
+        _visual_client = VisualSearchClient()
+
+    s, e = _window(start, end) if (start or end) else (None, None)
+    start_ts = int(s.timestamp()) if s else None
+    end_ts = int(e.timestamp()) if e else None
+
+    query_embedding = visual_embeddings.encode_text(query)
+    return _visual_client.search_by_embedding(query_embedding, store_id, start_ts, end_ts, top_k)
+
+
+def _tool_search_visual(query, store_id=None, start=None, end=None, top_k=5):
+    results = run_visual_search(query, store_id, start, end, top_k)
+    # Thumbnails are base64 image blobs - useless (and token-expensive) for the
+    # LLM to read; the /visual-search endpoint returns them for display instead.
+    return [{k: v for k, v in r.items() if k != "thumbnail_b64"} for r in results]
+
+
+DISPATCH = {
+    "list_stores": lambda: fetch_stores(),
+    "get_footfall": _tool_get_footfall,
+    "get_demographics": _tool_get_demographics,
+    "get_dwell_time": _tool_get_dwell_time,
+    "list_persons": _tool_list_persons,
+    "list_entry_exit_logs": _tool_list_entry_exit_logs,
+    "search_visual": _tool_search_visual,
+}
 
 _client = None
 
@@ -317,21 +492,22 @@ def _get_client():
     if _client is None:
         if not LITELLM_API_KEY:
             raise RuntimeError("LITELLM_API_KEY is not set - copy .env.example to .env and fill it in")
+        from openai import OpenAI
+
         _client = OpenAI(api_key=LITELLM_API_KEY, base_url=LITELLM_BASE_URL)
     return _client
 
 
-def chat(message, history=None):
-    """Run one user turn through the tool-calling loop. Returns (answer, new_history)."""
+def _llm_chat(message, history=None):
     history = history or []
     system = {"role": "system", "content": SYSTEM_PROMPT.format(now=datetime.now(timezone.utc).isoformat())}
     messages = [system] + history + [{"role": "user", "content": message}]
+    client = _get_client()
 
     for _ in range(MAX_TOOL_ROUNDS):
-        response = client.chat.completions.create(
-            model=LITELLM_MODEL, messages=messages, tools=tools
-        )
+        response = client.chat.completions.create(model=LITELLM_MODEL, messages=messages, tools=TOOLS)
         choice = response.choices[0].message
+
         if not choice.tool_calls:
             messages.append({"role": "assistant", "content": choice.content})
             return choice.content, messages[1:]
@@ -345,7 +521,7 @@ def chat(message, history=None):
             name = tool_call.function.name
             args = json.loads(tool_call.function.arguments or "{}")
             try:
-                result = dispatch[name](**args)
+                result = DISPATCH[name](**args)
             except Exception as e:
                 result = {"error": str(e)}
             messages.append({
@@ -354,7 +530,7 @@ def chat(message, history=None):
                 "content": json.dumps(result, default=str),
             })
 
-    return "Could not finish that — try a narrower question.", messages[1:]
+    return "I couldn't finish that after several tool calls - try a narrower question.", messages[1:]
 
 
 def chat(message, history=None):
@@ -363,18 +539,15 @@ def chat(message, history=None):
         try:
             return _llm_chat(message, history)
         except Exception as e:
-            # Fall back so /chat still works when the proxy is down.
+            # Fall back so /chat still works when the proxy is unreachable.
             answer, hist = _simple_chat(message, history)
-            return (
-                f"(LLM unavailable: {e}. Using simple mode.)\n{answer}",
-                hist,
-            )
+            return f"(LLM unavailable: {e}. Using simple mode.)\n{answer}", hist
     return _simple_chat(message, history)
 
 
 if __name__ == "__main__":
     print(f"CCTV analytics chatbot (mode={CHAT_MODE})")
-    print("Ask about footfall, demographics, or stores. Type 'exit' to quit.\n")
+    print("Ask about stores, footfall, demographics, dwell time, or entry/exit logs. Type 'exit' to quit.\n")
     conversation = []
     while True:
         try:

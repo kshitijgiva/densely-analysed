@@ -40,7 +40,7 @@ from validate_pipeline import percentiles, collect_similarity_pairs
 
 def run(video_source, output_path, max_frames, metrics_out_path,
         run_demographics=True, demographics_backend="mivolo-body",
-        use_chroma=False, store_id="store_1", camera_id="camera_1",
+        use_chroma=False, use_visual_search=False, store_id="store_1", camera_id="camera_1",
         sample_frames=0, sample_window_seconds=10, write_video=True):
     if sample_frames < 0:
         raise ValueError("sample_frames cannot be negative")
@@ -58,6 +58,15 @@ def run(video_source, output_path, max_frames, metrics_out_path,
         purged = chroma.purge_expired()
         if purged:
             print(f"Purged {purged} expired ChromaDB embeddings")
+
+    visual_client = None
+    if use_visual_search:
+        from services.visual_search import VisualSearchClient
+
+        visual_client = VisualSearchClient()
+        purged = visual_client.purge_expired()
+        if purged:
+            print(f"Purged {purged} expired visual-search embeddings")
 
     mivolo_official = None
     if run_demographics:
@@ -96,6 +105,7 @@ def run(video_source, output_path, max_frames, metrics_out_path,
     detections_log = []  # (frame_idx, track_id, embedding, bbox) (M2)
     det_confidences = [] # every YOLO detection confidence seen
     people_per_frame = []
+    best_crop = {}       # identity_id -> (bbox_area, crop) - largest/clearest view, for visual search
 
     frame_idx = -1
     last_source_frame = -1
@@ -204,6 +214,12 @@ def run(video_source, output_path, max_frames, metrics_out_path,
                         )
                     track_id_to_identity[track_id] = identity_id
 
+            if visual_client is not None:
+                area = (x2 - x1) * (y2 - y1)
+                current = best_crop.get(identity_id)
+                if current is None or area > current[0]:
+                    best_crop[identity_id] = (area, person_img.copy())
+
             if run_demographics:
                 video_time = frame_idx / fps
                 identity = identities[identity_id]
@@ -266,6 +282,20 @@ def run(video_source, output_path, max_frames, metrics_out_path,
                     camera_id,
                 )
 
+    visual_embeddings_stored = 0
+    if visual_client is not None:
+        import visual_embeddings
+
+        for identity_id, (_, crop) in best_crop.items():
+            identity = identities[identity_id]
+            try:
+                embedding = visual_embeddings.encode_image(crop)
+                thumbnail = visual_embeddings.make_thumbnail(crop)
+                visual_client.upsert_visual(identity.person_id, embedding, thumbnail, store_id, camera_id)
+                visual_embeddings_stored += 1
+            except Exception as e:
+                print(f"Visual embedding failed for identity {identity_id}: {e}")
+
     elapsed = time.time() - start
     lengths = [s["count"] for s in track_stats.values()]
     fragments = sum(1 for l in lengths if l <= 2)
@@ -325,6 +355,10 @@ def run(video_source, output_path, max_frames, metrics_out_path,
             "chroma_matches": chroma_match_count,
         },
         "demographics_m3": demographics_m3,
+        "visual_search": {
+            "enabled": visual_client is not None,
+            "embeddings_stored": visual_embeddings_stored,
+        },
     }
 
     print(f"\n=== Run summary ===")
@@ -389,6 +423,10 @@ if __name__ == "__main__":
     parser.add_argument("--chroma", action="store_true",
                          help="Use ChromaDB for short-lived cross-run/cross-camera re-identification. "
                               "Enabled automatically by --persist.")
+    parser.add_argument("--visual-search", action="store_true",
+                         help="Compute a CLIP embedding + thumbnail per identity and store them in "
+                              "the person_visual_search Chroma collection for semantic text search. "
+                              "Longer-lived than re-id vectors (VISUAL_SEARCH_TTL_DAYS) - see config.py.")
     parser.add_argument("--store-id", default="store_1")
     parser.add_argument("--camera-id", default="camera_1")
     args = parser.parse_args()
@@ -404,6 +442,7 @@ if __name__ == "__main__":
                  run_demographics=not args.no_demographics,
                  demographics_backend=args.demographics_backend,
                  use_chroma=args.chroma or args.persist,
+                 use_visual_search=args.visual_search,
                  store_id=args.store_id,
                  camera_id=args.camera_id,
                  sample_frames=args.sample_frames,

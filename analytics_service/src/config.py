@@ -36,6 +36,13 @@ CHROMADB_DATABASE = os.environ.get("CHROMADB_DATABASE", "default_database")
 CHROMADB_COLLECTION = os.environ.get("CHROMADB_COLLECTION", "person_reid")
 CHROMADB_TTL_HOURS = int(os.environ.get("CHROMADB_TTL_HOURS", "48"))
 
+# Semantic visual search (CLIP) - a separate, longer-lived collection from the
+# short-TTL re-id vectors above. Keeping thumbnails/embeddings around for text
+# search is a deliberate exception to the platform's default short-retention
+# stance (design doc S6) - 30 days is a starting point, not a fixed rule.
+CHROMADB_VISUAL_COLLECTION = os.environ.get("CHROMADB_VISUAL_COLLECTION", "person_visual_search")
+VISUAL_SEARCH_TTL_DAYS = int(os.environ.get("VISUAL_SEARCH_TTL_DAYS", "30"))
+
 AGE_GENDER_MODEL = "MiVOLO"  # iitolstykh/mivolo_v2 via transformers, see demographics.py
 DEMOGRAPHICS_MODEL = "body"  # Options: 'face', 'body', 'hybrid' - only 'body' is implemented
 VERTEX_PROJECT_ID = "visual-similarity-459311"

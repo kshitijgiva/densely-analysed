@@ -161,6 +161,37 @@ def get_footfall_count(store_id, start_time, end_time):
     return row["footfall"] if row else 0
 
 
+def get_average_dwell_time(store_id, start_time, end_time):
+    """Average time-in-store per visit: last_seen - first_seen, for persons
+    first seen in the window. Store-level only - no per-zone breakdown (S5
+    zone/dwell logic isn't implemented yet)."""
+    row = _execute(
+        """
+        SELECT
+            COUNT(*) AS n,
+            AVG(EXTRACT(EPOCH FROM (last_seen - first_seen))) AS avg_seconds,
+            MIN(EXTRACT(EPOCH FROM (last_seen - first_seen))) AS min_seconds,
+            MAX(EXTRACT(EPOCH FROM (last_seen - first_seen))) AS max_seconds,
+            PERCENTILE_CONT(0.5) WITHIN GROUP (
+                ORDER BY EXTRACT(EPOCH FROM (last_seen - first_seen))
+            ) AS median_seconds
+        FROM persons
+        WHERE store_id = %s AND first_seen >= %s AND first_seen <= %s;
+        """,
+        (store_id, start_time, end_time), fetch="one",
+    )
+    if not row or not row["n"]:
+        return {"sample_size": 0, "avg_seconds": None, "min_seconds": None,
+                "max_seconds": None, "median_seconds": None}
+    return {
+        "sample_size": row["n"],
+        "avg_seconds": round(float(row["avg_seconds"]), 1),
+        "min_seconds": round(float(row["min_seconds"]), 1),
+        "max_seconds": round(float(row["max_seconds"]), 1),
+        "median_seconds": round(float(row["median_seconds"]), 1),
+    }
+
+
 def get_demographics_breakdown(store_id, start_time, end_time):
     """Gender/age-group counts for persons first seen in the window."""
     gender_rows = _execute(
