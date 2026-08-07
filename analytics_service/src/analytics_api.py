@@ -117,6 +117,7 @@ def _process_job(job_id: str, request: AnalysisRequest) -> None:
             result["fps"],
             run_start=run_start,
             camera_url=request.google_drive_url,
+            require_demographics=request.demographics,
         )
 
         _update_job(
