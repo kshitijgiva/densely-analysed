@@ -1,23 +1,47 @@
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import psycopg2
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from chatbot import chat as run_chat
+from chatbot import chat as run_chat, generate_narrative
 from db.postgres import (
     fetch_person,
     fetch_store,
     fetch_stores,
+    get_average_dwell_seconds,
     get_demographics_breakdown,
+    get_demographics_crosstab,
     get_footfall_count,
+    get_footfall_time_series,
     list_entry_exit_logs,
     list_persons,
     upsert_store,
 )
 
 app = FastAPI(title="Store CCTV Analytics API")
+
+# Zero-Auth MVP: the Next.js FE calls this API directly from the browser
+# (NEXT_PUBLIC_BACKEND_URL), so the allowed origins must be explicit per the
+# spec's CORS policy. Comma-separated list, e.g. CORS_ORIGINS=http://localhost:3000,https://app.example.com
+_CORS_ORIGINS = [
+    origin.strip()
+    for origin in os.environ.get("CORS_ORIGINS", "http://localhost:3000").split(",")
+    if origin.strip()
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+_TIMEFRAME_HOURS = {"1h": 1, "4h": 4, "1d": 24, "2d": 48}
 
 
 class StoreIn(BaseModel):
@@ -28,9 +52,13 @@ class StoreIn(BaseModel):
     metadata: Optional[dict] = None
 
 
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+
 class ChatIn(BaseModel):
-    message: str
-    history: Optional[list] = None
+    messages: list[ChatMessage]
 
 
 def _default_window(start: Optional[datetime], end: Optional[datetime]):
@@ -38,6 +66,28 @@ def _default_window(start: Optional[datetime], end: Optional[datetime]):
     end = end or datetime.now(timezone.utc)
     start = start or end - timedelta(hours=24)
     return start, end
+
+
+def _timeframe_window(timeframe: str):
+    if timeframe not in _TIMEFRAME_HOURS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid timeframe '{timeframe}'. Use one of {sorted(_TIMEFRAME_HOURS)}.",
+        )
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(hours=_TIMEFRAME_HOURS[timeframe])
+    return start, end
+
+
+def _grouping_interval(start: datetime, end: datetime):
+    """>24h windows group by day instead of hour, per the /reports contract."""
+    if (end - start) <= timedelta(hours=24):
+        return "hour", "hourly"
+    return "day", "daily"
+
+
+def _format_label(bucket_start: datetime, bucket: str):
+    return bucket_start.strftime("%H:%M") if bucket == "hour" else bucket_start.strftime("%Y-%m-%d")
 
 
 def _run_query(fn, *args, **kwargs):
@@ -113,10 +163,89 @@ async def store_entry_exit_logs(store_id: str, person_id: Optional[str] = None,
     return _run_query(list_entry_exit_logs, store_id, person_id, start, end, limit)
 
 
+@app.get("/overview")
+async def overview(store_id: Optional[str] = None, timeframe: str = "1d"):
+    start, end = _timeframe_window(timeframe)
+    calculated_at = datetime.now(timezone.utc)
+
+    footfall = _run_query(get_footfall_count, store_id, start, end)
+    dwell = _run_query(get_average_dwell_seconds, store_id, start, end)
+    series = _run_query(get_footfall_time_series, store_id, start, end, "hour")
+    demographics = _run_query(get_demographics_crosstab, store_id, start, end)
+
+    kpis = {
+        "total_footfall": footfall,
+        # Not tracked yet - the pipeline never assigns detections to a zone
+        # (see persist.py), so there's no checkout/conversion signal to compute this from.
+        "conversion_rate": None,
+        "average_dwell_time_seconds": dwell,
+        # Not tracked yet - the pipeline is a batch job that persists a person's
+        # entry+exit together only once the whole job finishes, so there's no
+        # live "currently in store" state anywhere to count from.
+        "active_visitors": 0,
+    }
+
+    return {
+        "meta": {"store_id": store_id, "timeframe": timeframe, "calculated_at": calculated_at},
+        "kpis": kpis,
+        "footfall_time_series": [
+            {"timestamp": row["bucket_start"], "count": row["count"]} for row in series
+        ],
+        "demographics": demographics,
+        # No per-store position data is persisted yet, so there's nothing to render this from.
+        "heatmap_image_base64": None,
+        "narrative_summary": generate_narrative(kpis, store_id),
+    }
+
+
+@app.get("/reports")
+async def reports(store_id: str, start_date: datetime, end_date: datetime):
+    bucket, grouping_interval = _grouping_interval(start_date, end_date)
+
+    footfall = _run_query(get_footfall_count, store_id, start_date, end_date)
+    dwell = _run_query(get_average_dwell_seconds, store_id, start_date, end_date)
+    series = _run_query(get_footfall_time_series, store_id, start_date, end_date, bucket)
+    demographics = _run_query(get_demographics_crosstab, store_id, start_date, end_date)
+
+    return {
+        "meta": {
+            "store_id": store_id,
+            "start_date": start_date,
+            "end_date": end_date,
+            "grouping_interval": grouping_interval,
+        },
+        "kpis": {
+            "total_footfall": footfall,
+            "average_dwell_time_seconds": dwell,
+            "conversion_rate": None,  # see /overview - no zone/checkout data in the pipeline yet
+        },
+        "time_series_trends": [
+            {
+                "label": _format_label(row["bucket_start"], bucket),
+                "footfall": row["count"],
+                "conversion_rate": None,
+            }
+            for row in series
+        ],
+        "zone_analytics": [],  # zones aren't tracked by the pipeline yet (see persist.py)
+        "demographics": demographics,
+    }
+
+
 @app.post("/chat")
 async def chat_endpoint(payload: ChatIn):
+    if not payload.messages:
+        raise HTTPException(status_code=400, detail="messages must not be empty")
+
+    *history, last = payload.messages
     try:
-        answer, history = run_chat(payload.message, payload.history)
+        answer, _ = run_chat(last.content, [m.model_dump() for m in history])
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    return {"answer": answer, "history": history}
+
+    def stream():
+        chunk_size = 40
+        for i in range(0, len(answer), chunk_size):
+            yield answer[i : i + chunk_size]
+
+    return StreamingResponse(stream(), media_type="text/plain")

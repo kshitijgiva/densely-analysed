@@ -148,17 +148,108 @@ def list_entry_exit_logs(store_id=None, person_id=None, start_time=None, end_tim
 # --- aggregate queries (S3.7: "REST API for querying stats") -----------------
 
 def get_footfall_count(store_id, start_time, end_time):
-    """Unique footfall = distinct persons with an 'entry' event in the window."""
+    """Unique footfall = distinct persons with an 'entry' event in the window.
+    store_id=None aggregates across all stores (Giva Owner view)."""
+    conditions = ["event_type = 'entry'", "event_time >= %s", "event_time <= %s"]
+    params = [start_time, end_time]
+    if store_id:
+        conditions.append("store_id = %s")
+        params.append(store_id)
     row = _execute(
-        """
+        f"""
         SELECT COUNT(DISTINCT person_id) AS footfall
         FROM entry_exit_logs
-        WHERE store_id = %s AND event_type = 'entry'
-          AND event_time >= %s AND event_time <= %s;
+        WHERE {' AND '.join(conditions)};
         """,
-        (store_id, start_time, end_time), fetch="one",
+        tuple(params), fetch="one",
     )
     return row["footfall"] if row else 0
+
+
+def get_average_dwell_seconds(store_id, start_time, end_time):
+    """Average visit duration (last_seen - first_seen) for persons first seen in
+    the window. store_id=None aggregates across all stores."""
+    conditions = ["first_seen >= %s", "first_seen <= %s"]
+    params = [start_time, end_time]
+    if store_id:
+        conditions.append("store_id = %s")
+        params.append(store_id)
+    row = _execute(
+        f"""
+        SELECT AVG(EXTRACT(EPOCH FROM (last_seen - first_seen))) AS avg_dwell
+        FROM persons
+        WHERE {' AND '.join(conditions)};
+        """,
+        tuple(params), fetch="one",
+    )
+    avg_dwell = row["avg_dwell"] if row else None
+    return round(float(avg_dwell), 1) if avg_dwell is not None else 0.0
+
+
+def get_footfall_time_series(store_id, start_time, end_time, bucket="hour"):
+    """Distinct-person footfall counts bucketed by hour or day, for the
+    /overview and /reports time-series charts. store_id=None aggregates
+    across all stores."""
+    if bucket not in ("hour", "day"):
+        raise ValueError("bucket must be 'hour' or 'day'")
+    conditions = ["event_type = 'entry'", "event_time >= %s", "event_time <= %s"]
+    params = [start_time, end_time]
+    if store_id:
+        conditions.append("store_id = %s")
+        params.append(store_id)
+    return _execute(
+        f"""
+        SELECT date_trunc(%s, event_time) AS bucket_start, COUNT(DISTINCT person_id) AS count
+        FROM entry_exit_logs
+        WHERE {' AND '.join(conditions)}
+        GROUP BY bucket_start
+        ORDER BY bucket_start;
+        """,
+        (bucket, *params), fetch="all",
+    )
+
+
+def get_demographics_crosstab(store_id, start_time, end_time):
+    """Gender totals plus an age-group x gender breakdown, shaped for the
+    /overview and /reports API contract (gender as a list of {name, value},
+    age_groups cross-tabbed by gender). store_id=None aggregates across all
+    stores."""
+    conditions = ["first_seen >= %s", "first_seen <= %s"]
+    params = [start_time, end_time]
+    if store_id:
+        conditions.append("store_id = %s")
+        params.append(store_id)
+    where = " AND ".join(conditions)
+
+    gender_rows = _execute(
+        f"""
+        SELECT COALESCE(gender, 'unknown') AS gender, COUNT(*) AS count
+        FROM persons
+        WHERE {where}
+        GROUP BY gender;
+        """,
+        tuple(params), fetch="all",
+    )
+    crosstab_rows = _execute(
+        f"""
+        SELECT COALESCE(age_group, 'unknown') AS age_group,
+               COALESCE(gender, 'unknown') AS gender,
+               COUNT(*) AS count
+        FROM persons
+        WHERE {where}
+        GROUP BY age_group, gender;
+        """,
+        tuple(params), fetch="all",
+    )
+
+    gender = [{"name": r["gender"].capitalize(), "value": r["count"]} for r in gender_rows]
+
+    age_groups = {}
+    for row in crosstab_rows:
+        entry = age_groups.setdefault(row["age_group"], {"group": row["age_group"]})
+        entry[row["gender"]] = row["count"]
+
+    return {"gender": gender, "age_groups": list(age_groups.values())}
 
 
 def get_demographics_breakdown(store_id, start_time, end_time):
