@@ -26,18 +26,19 @@ from db.postgres import (
 
 app = FastAPI(title="Store CCTV Analytics API")
 
-# Zero-Auth MVP: the Next.js FE calls this API directly from the browser
-# (NEXT_PUBLIC_BACKEND_URL), so the allowed origins must be explicit per the
-# spec's CORS policy. Comma-separated list, e.g. CORS_ORIGINS=http://localhost:3000,https://app.example.com
-_CORS_ORIGINS = [
-    origin.strip()
-    for origin in os.environ.get("CORS_ORIGINS", "http://localhost:3000").split(",")
-    if origin.strip()
-]
+# Comma-separated origins, or "*" to allow all (credentials must be off with "*").
+# e.g. CORS_ORIGINS=http://localhost:3000,https://app.example.com
+_CORS_RAW = os.environ.get("CORS_ORIGINS", "*").strip()
+_CORS_ALLOW_ALL = _CORS_RAW == "*"
+_CORS_ORIGINS = (
+    ["*"]
+    if _CORS_ALLOW_ALL
+    else [origin.strip() for origin in _CORS_RAW.split(",") if origin.strip()]
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_CORS_ORIGINS,
-    allow_credentials=True,
+    allow_credentials=not _CORS_ALLOW_ALL,
     allow_methods=["*"],
     allow_headers=["*"],
 )

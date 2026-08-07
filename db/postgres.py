@@ -5,13 +5,22 @@ from psycopg2.extras import Json, RealDictCursor
 
 
 def get_connection():
-    return psycopg2.connect(
+    # Prefer a full URL (Railway / Prisma) when set; else discrete DB_* vars.
+    database_url = os.environ.get("DATABASE_URL")
+    if database_url:
+        return psycopg2.connect(database_url)
+
+    kwargs = dict(
         dbname=os.environ.get("DB_NAME", "cctv_analytics"),
         user=os.environ.get("DB_USER", "cctv"),
         password=os.environ.get("DB_PASSWORD", "cctvpass"),
         host=os.environ.get("DB_HOST", "localhost"),
         port=os.environ.get("DB_PORT", "5432"),
     )
+    sslmode = os.environ.get("DB_SSLMODE")
+    if sslmode:
+        kwargs["sslmode"] = sslmode
+    return psycopg2.connect(**kwargs)
 
 
 def _execute(query, params=None, fetch=None):

@@ -37,11 +37,14 @@ services:
     ports:
       - "8080:8080"
     environment:
-      DB_HOST: db
-      DB_NAME: cctv_analytics
-      DB_USER: cctv
-      DB_PASSWORD: cctvpass
-      DB_PORT: "5432"
+      DATABASE_URL: ${DATABASE_URL:-}
+      DB_HOST: ${DB_HOST:-db}
+      DB_NAME: ${DB_NAME:-cctv_analytics}
+      DB_USER: ${DB_USER:-cctv}
+      DB_PASSWORD: ${DB_PASSWORD:-cctvpass}
+      DB_PORT: ${DB_PORT:-5432}
+      DB_SSLMODE: ${DB_SSLMODE:-}
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
       CHAT_MODE: ${CHAT_MODE:-simple}
       LITELLM_BASE_URL: ${LITELLM_BASE_URL:-}
       LITELLM_API_KEY: ${LITELLM_API_KEY:-}
