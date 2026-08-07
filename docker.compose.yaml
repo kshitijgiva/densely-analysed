@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15
+    restart: always
+    environment:
+      POSTGRES_USER: cctv
+      POSTGRES_PASSWORD: cctvpass
+      POSTGRES_DB: cctv_analytics
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+  
+  chromadb:
+    image: chromadb/chroma:1.0.9
+    ports:
+      - 8000:8000
+    environment:
+      - IS_PERSISTENT=TRUE
+      - PERSIST_DIRECTORY=/data/chroma
+      - ANONYMIZED_TELEMETRY=TRUE
+    volumes:
+      - chroma_data:/data/chroma
+      - ./custom-config.yaml:/config.yaml:ro
+
+volumes:
+  pgdata:
+  chroma_data:
