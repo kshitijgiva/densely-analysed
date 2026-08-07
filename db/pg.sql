@@ -56,3 +56,24 @@ CREATE TABLE IF NOT EXISTS entry_exit_logs (
 SELECT create_hypertable('entry_exit_logs', 'event_time', if_not_exists => TRUE);
 CREATE INDEX IF NOT EXISTS idx_entry_exit_person_time ON entry_exit_logs (person_id, event_time);
 CREATE INDEX IF NOT EXISTS idx_entry_exit_store_time ON entry_exit_logs (store_id, event_time);
+
+-- Dashboard "highlights" per store/camera - a small, ranked subset of frames
+-- flagged by analytics_service/src/significant_frames.py (footfall change or
+-- motion-based movement change), not a full frame dump. image_url is a
+-- pointer into object storage, same as persons.reid_embedding_ref points into
+-- ChromaDB - no raw imagery in this table, per the header note above.
+CREATE TABLE IF NOT EXISTS significant_frames (
+    id               BIGSERIAL,
+    store_id         VARCHAR(64) REFERENCES stores(store_id),
+    camera_id        VARCHAR(64) NOT NULL,
+    event_time       TIMESTAMPTZ NOT NULL,
+    person_count     INTEGER,
+    motion_ratio     FLOAT,
+    reasons          TEXT[],
+    importance_score FLOAT,
+    image_url        TEXT NOT NULL,
+    PRIMARY KEY (id, event_time)
+);
+SELECT create_hypertable('significant_frames', 'event_time', if_not_exists => TRUE);
+CREATE INDEX IF NOT EXISTS idx_significant_frames_store_time ON significant_frames (store_id, event_time DESC);
+CREATE INDEX IF NOT EXISTS idx_significant_frames_store_importance ON significant_frames (store_id, importance_score DESC);

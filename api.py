@@ -20,6 +20,7 @@ from db.postgres import (
     get_footfall_time_series,
     list_entry_exit_logs,
     list_persons,
+    list_significant_frames,
     upsert_store,
 )
 
@@ -153,6 +154,16 @@ async def get_person(person_id: str):
     if person is None:
         raise HTTPException(status_code=404, detail=f"Person '{person_id}' not found")
     return person
+
+
+@app.get("/stores/{store_id}/significant-frames")
+async def store_significant_frames(store_id: str, start: Optional[datetime] = None,
+                                    end: Optional[datetime] = None,
+                                    limit: int = Query(default=10, le=100)):
+    """The dashboard's per-store highlights: highest-importance flagged frames
+    in the window, not every frame significant_frames.py saved locally."""
+    start, end = _default_window(start, end)
+    return _run_query(list_significant_frames, store_id, start, end, limit)
 
 
 @app.get("/stores/{store_id}/entry-exit-logs")
