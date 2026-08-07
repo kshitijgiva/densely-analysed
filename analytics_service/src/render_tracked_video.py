@@ -529,6 +529,7 @@ if __name__ == "__main__":
         count = persist_identities(
             result["identities"], args.store_id, args.camera_id, result["fps"],
             run_start=datetime.now(timezone.utc) - timedelta(seconds=video_duration),
+            require_demographics=not args.no_demographics,
         )
         print(
             f"Persisted {count} identities to Postgres and ChromaDB "
