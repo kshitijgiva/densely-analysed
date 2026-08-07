@@ -41,7 +41,18 @@ from validate_pipeline import percentiles, collect_similarity_pairs
 def run(video_source, output_path, max_frames, metrics_out_path,
         run_demographics=True, demographics_backend="mivolo-body",
         use_chroma=False, store_id="store_1", camera_id="camera_1",
-        sample_frames=0, sample_window_seconds=10, write_video=True):
+        sample_frames=0, sample_window_seconds=10, write_video=True,
+        reid_threshold=REID_THRESHOLD):
+    """reid_threshold defaults to the config value, which was tuned on dense,
+    frame-by-frame footage (see validate_pipeline.py) where consecutive
+    same-person appearances are captured a fraction of a second apart. When
+    sample_frames > 0, consecutive appearances of the same person are instead
+    seconds apart, so their OSNet similarity is naturally lower - reusing the
+    dense-tracking threshold here causes the same real person to be split
+    into multiple new identities (inflating footfall with no real increase
+    in people). Re-validate with `validate_pipeline.py --sample-frames
+    --sample-window-seconds` matching this run's sampling and pass the
+    suggested threshold in explicitly."""
     if sample_frames < 0:
         raise ValueError("sample_frames cannot be negative")
     if sample_frames > 0 and sample_window_seconds <= 0:
@@ -153,7 +164,7 @@ def run(video_source, output_path, max_frames, metrics_out_path,
                 identities[identity_id].add_appearance(features, frame_idx)
             else:
                 matched_id, similarity = match_identity(features, identities)
-                if matched_id is not None and similarity > REID_THRESHOLD:
+                if matched_id is not None and similarity > reid_threshold:
                     identity_id = matched_id
                     identities[identity_id].add_appearance(features, frame_idx)
                     track_id_to_identity[track_id] = identity_id
@@ -163,7 +174,7 @@ def run(video_source, output_path, max_frames, metrics_out_path,
                     chroma_match = None
                     if chroma is not None:
                         chroma_match = chroma.match_identity(
-                            features, store_id, REID_THRESHOLD
+                            features, store_id, reid_threshold
                         )
 
                     if chroma_match is not None:
@@ -313,7 +324,7 @@ def run(video_source, output_path, max_frames, metrics_out_path,
             "fragment_tracks_pct": round(100 * fragments / len(lengths), 1) if lengths else None,
         },
         "reid_m2": {
-            "reid_threshold": REID_THRESHOLD,
+            "reid_threshold": reid_threshold,
             "same_person_pairs": len(same_id_sims),
             "diff_person_pairs": len(diff_id_sims),
             "same_person_sim_p5": same_p[5],
@@ -375,6 +386,11 @@ if __name__ == "__main__":
                          help="Process this many evenly spaced frames per sampling window (0 = every frame)")
     parser.add_argument("--sample-window-seconds", type=float, default=10,
                          help="Sampling window size in seconds (used with --sample-frames)")
+    parser.add_argument("--reid-threshold", type=float, default=REID_THRESHOLD,
+                         help="Cosine similarity threshold for re-identification. The config "
+                              "default is tuned for dense, frame-by-frame tracking - when using "
+                              "--sample-frames, re-validate with validate_pipeline.py using the "
+                              "same sampling and pass the suggested value here.")
     parser.add_argument("--no-video", action="store_true",
                          help="Do not encode an annotated output video")
     parser.add_argument("--no-demographics", action="store_true",
@@ -408,7 +424,8 @@ if __name__ == "__main__":
                  camera_id=args.camera_id,
                  sample_frames=args.sample_frames,
                  sample_window_seconds=args.sample_window_seconds,
-                 write_video=not args.no_video)
+                 write_video=not args.no_video,
+                 reid_threshold=args.reid_threshold)
 
     if args.persist:
         from datetime import datetime, timedelta, timezone

@@ -27,6 +27,15 @@ REID_MODEL_CHECKPOINT = "osnet_x1_0_market1501.pt"  # market1501-trained weights
 REID_WEIGHTS_DIR = os.path.join(os.path.dirname(__file__), "weights")
 REID_THRESHOLD = 0.94  # Cosine similarity threshold for re-identification, tuned via validate_pipeline.py
                        # (separates same-person p5=0.95 from different-person p95=0.76 on test footage)
+                       # NOTE: tuned on dense, frame-by-frame footage (consecutive same-person
+                       # detections a fraction of a second apart). The sparse-sampling path used
+                       # for big videos (render_tracked_video.py/analytics_api.py with
+                       # sample_frames > 0) sees consecutive appearances seconds apart, so real
+                       # same-person similarity is naturally lower - reusing this default there
+                       # fragments one person into several new identities and inflates footfall.
+                       # Re-validate with `validate_pipeline.py --sample-frames --sample-window-seconds`
+                       # matching your sampling and pass the result via --reid-threshold / the
+                       # analysis job's reid_threshold field.
 
 # Short-lived cross-process/cross-camera re-identification store.
 CHROMADB_HOST = os.environ.get("CHROMADB_HOST", "localhost")
