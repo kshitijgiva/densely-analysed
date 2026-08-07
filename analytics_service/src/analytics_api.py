@@ -83,7 +83,7 @@ def _update_job(job_id: str, **values) -> None:
 def _process_job(job_id: str, request: AnalysisRequest) -> None:
     # Keep API startup light; load PyTorch/YOLO only when a worker starts a job.
     from render_tracked_video import run
-    from persist import persist_identities
+    from persist import persist_identities, persist_heatmap
 
     temp_dir = Path(tempfile.mkdtemp(prefix=f"cctv-{job_id}-"))
     input_path = temp_dir / "input_video"
@@ -143,6 +143,20 @@ def _process_job(job_id: str, request: AnalysisRequest) -> None:
             require_demographics=request.demographics,
         )
 
+        # Uploads/persists before temp_dir (which holds the local heatmap PNG)
+        # is removed in `finally` below. A failed upload shouldn't fail an
+        # otherwise-successful job - identities are already persisted above.
+        heatmap_url = None
+        heatmap_image_path = result["report"]["heatmap"].get("image_path")
+        if heatmap_image_path:
+            from cloudinary_upload import upload_heatmap
+
+            try:
+                heatmap_url = upload_heatmap(heatmap_image_path, request.store_id, request.camera_id)
+                persist_heatmap(request.store_id, request.camera_id, heatmap_url)
+            except Exception as exc:
+                print(f"Warning: heatmap upload/persist failed for job {job_id}: {exc}")
+
         _update_job(
             job_id,
             status="completed",
@@ -150,6 +164,7 @@ def _process_job(job_id: str, request: AnalysisRequest) -> None:
             persisted_identities=persisted,
             metrics=result["report"],
             metrics_path=str(metrics_path),
+            heatmap_url=heatmap_url,
         )
     except Exception as exc:
         _update_job(

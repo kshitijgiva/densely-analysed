@@ -18,6 +18,7 @@ from db.postgres import (
     get_demographics_crosstab,
     get_footfall_count,
     get_footfall_time_series,
+    get_latest_heatmap_url,
     list_entry_exit_logs,
     list_persons,
     list_significant_frames,
@@ -184,6 +185,8 @@ async def overview(store_id: Optional[str] = None, timeframe: str = "1d"):
     dwell = _run_query(get_average_dwell_seconds, store_id, start, end)
     series = _run_query(get_footfall_time_series, store_id, start, end, "hour")
     demographics = _run_query(get_demographics_crosstab, store_id, start, end)
+    # Aggregate (no store_id) view has no single camera to show a heatmap for.
+    heatmap_url = _run_query(get_latest_heatmap_url, store_id) if store_id else None
 
     kpis = {
         "total_footfall": footfall,
@@ -204,8 +207,8 @@ async def overview(store_id: Optional[str] = None, timeframe: str = "1d"):
             {"timestamp": row["bucket_start"], "count": row["count"]} for row in series
         ],
         "demographics": demographics,
-        # No per-store position data is persisted yet, so there's nothing to render this from.
-        "heatmap_image_base64": None,
+        # None until a pipeline run with --persist has uploaded one for this store.
+        "heatmap_image_url": heatmap_url,
         "narrative_summary": generate_narrative(kpis, store_id),
     }
 

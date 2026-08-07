@@ -19,6 +19,10 @@ accelerate==1.8.1
 # Demographics (M3) - alerts.py (Ollama HTTP client)
 requests
 
+# Heatmap hosting (M4) - cloudinary_upload.py, used by render_tracked_video.py --persist
+cloudinary
+python-dotenv
+
 # NOTE: the `mivolo` package (needed for both demographics backends, and for
 # the mivolo-official backend's Detector/MiVOLO classes) is not on PyPI and
 # is NOT installed by this file - see README.md for the exact install

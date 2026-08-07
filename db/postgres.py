@@ -209,6 +209,36 @@ def list_significant_frames(store_id, start_time=None, end_time=None, limit=10):
     )
 
 
+def upsert_camera_heatmap(store_id, camera_id, image_url):
+    """One row per (store_id, camera_id) - each call overwrites the previous
+    URL/timestamp rather than accumulating history."""
+    _execute(
+        """
+        INSERT INTO camera_heatmaps (store_id, camera_id, image_url, updated_at)
+        VALUES (%s, %s, %s, now())
+        ON CONFLICT (store_id, camera_id) DO UPDATE SET
+            image_url = EXCLUDED.image_url,
+            updated_at = now();
+        """,
+        (store_id, camera_id, image_url),
+    )
+
+
+def get_latest_heatmap_url(store_id):
+    """Most recently updated camera's heatmap for this store - good enough for
+    a single-image /overview card even if a store has more than one camera."""
+    row = _execute(
+        """
+        SELECT image_url FROM camera_heatmaps
+        WHERE store_id = %s
+        ORDER BY updated_at DESC
+        LIMIT 1;
+        """,
+        (store_id,), fetch="one",
+    )
+    return row["image_url"] if row else None
+
+
 def get_average_dwell_seconds(store_id, start_time, end_time):
     """Average visit duration (last_seen - first_seen) for persons first seen in
     the window. store_id=None aggregates across all stores."""
