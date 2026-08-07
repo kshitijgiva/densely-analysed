@@ -40,6 +40,14 @@ class AnalysisRequest(BaseModel):
     camera_id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
     demographics: bool = True
     max_sampled_frames: int | None = Field(default=None, gt=0)
+    reid_threshold: float | None = Field(
+        default=None,
+        description="Cosine similarity threshold for re-identification. Defaults to "
+        "config.REID_THRESHOLD, which is tuned for dense, frame-by-frame tracking, not "
+        "this endpoint's sparse sampling (SAMPLE_FRAMES per SAMPLE_WINDOW_SECONDS) - re-validate "
+        "with validate_pipeline.py using matching --sample-frames/--sample-window-seconds "
+        "and pass the suggested value here if footfall looks inflated.",
+    )
 
 
 def _validate_google_drive_url(url: str) -> None:
@@ -81,7 +89,7 @@ def _process_job(job_id: str, request: AnalysisRequest) -> None:
 
         RESULTS_DIR.mkdir(parents=True, exist_ok=True)
         _update_job(job_id, status="analyzing")
-        result = run(
+        run_kwargs = dict(
             video_source=str(input_path),
             output_path=str(temp_dir / "unused.mp4"),
             max_frames=request.max_sampled_frames,
@@ -94,6 +102,9 @@ def _process_job(job_id: str, request: AnalysisRequest) -> None:
             sample_window_seconds=SAMPLE_WINDOW_SECONDS,
             write_video=False,
         )
+        if request.reid_threshold is not None:
+            run_kwargs["reid_threshold"] = request.reid_threshold
+        result = run(**run_kwargs)
 
         _update_job(job_id, status="persisting")
         run_start = datetime.now(timezone.utc) - timedelta(
