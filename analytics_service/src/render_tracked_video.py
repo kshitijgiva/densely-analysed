@@ -36,12 +36,14 @@ from reid import OSNetReID
 from identity import PersonIdentity, match_identity, needs_demographic_retry
 from utils import draw_boxes
 from validate_pipeline import percentiles, collect_similarity_pairs
+from heatmap import HeatmapAccumulator, render_heatmap
 import metrics_store
 
 
 def run(video_source, output_path, max_frames, metrics_out_path,
         run_demographics=True, demographics_backend="mivolo-body",
-        start_frame=0, segment_label=None, log_history=True):
+        start_frame=0, segment_label=None, log_history=True,
+        heatmap_hex_size=40):
     detection_model = load_detection_model()
     reid_model = OSNetReID()
 
@@ -76,11 +78,13 @@ def run(video_source, output_path, max_frames, metrics_out_path,
     detections_log = []  # (frame_idx, track_id, embedding, bbox) (M2)
     det_confidences = [] # every YOLO detection confidence seen
     people_per_frame = []
+    heatmap_acc = HeatmapAccumulator(width, height, hex_size=heatmap_hex_size)
 
     frame_idx = 0
     new_identity_count = 0
     reid_match_count = 0
     proc_fps_ema = None  # exponential moving average of per-frame processing FPS
+    last_raw_frame = None
     start = time.time()
 
     while max_frames is None or frame_idx < max_frames:
@@ -88,6 +92,7 @@ def run(video_source, output_path, max_frames, metrics_out_path,
         ret, frame = cap.read()
         if not ret:
             break
+        last_raw_frame = frame.copy()  # kept clean, for the final standalone heatmap image
 
         results = detect_people(detection_model, frame)
         official_frame_results = None  # lazily computed, cached per-frame
@@ -113,6 +118,7 @@ def run(video_source, output_path, max_frames, metrics_out_path,
             stats["last"] = frame_idx
             stats["count"] += 1
             detections_log.append((frame_idx, track_id, features, (x1, y1, x2, y2)))
+            heatmap_acc.add_bbox((x1, y1, x2, y2))
 
             if track_id in track_id_to_identity:
                 identity_id = track_id_to_identity[track_id]
@@ -160,6 +166,10 @@ def run(video_source, output_path, max_frames, metrics_out_path,
 
         people_per_frame.append(people_in_frame)
 
+        # Live cumulative heatmap, updated with this frame's own detections
+        # (heatmap_acc.add_bbox already ran above) - drawn first so the
+        # boxes/labels/overlay text stay legible on top of it.
+        frame = render_heatmap(frame, heatmap_acc)
         frame = draw_boxes(frame, results, track_id_to_identity, identities)
 
         frame_proc_time = time.time() - frame_start
@@ -237,7 +247,23 @@ def run(video_source, output_path, max_frames, metrics_out_path,
             "reid_merges": reid_match_count,
         },
         "demographics_m3": demographics_m3,
+        "heatmap": {
+            "hex_size": heatmap_acc.hex_size,
+            "occupied_cells": len(heatmap_acc.counts),
+            "total_visits": heatmap_acc.total_visits(),
+            "max_cell_count": heatmap_acc.max_count(),
+        },
     }
+
+    base, _ = os.path.splitext(output_path)
+    heatmap_image_path = base + "_heatmap.png"
+    heatmap_data_path = base + "_heatmap.json"
+    if heatmap_acc.total_visits() > 0 and last_raw_frame is not None:
+        heatmap_frame = render_heatmap(last_raw_frame, heatmap_acc)
+        cv2.imwrite(heatmap_image_path, heatmap_frame)
+        heatmap_acc.save(heatmap_data_path)
+        report["heatmap"]["image_path"] = heatmap_image_path
+        report["heatmap"]["data_path"] = heatmap_data_path
 
     print(f"\n=== Run summary ===")
     print(f"Processed {frame_idx} frames in {elapsed:.1f}s ({report['avg_processing_fps']:.1f} FPS)")
@@ -256,6 +282,10 @@ def run(video_source, output_path, max_frames, metrics_out_path,
               f"avg confidence (gender/age) = {demographics_m3['avg_gender_confidence']}/"
               f"{demographics_m3['avg_age_confidence']}")
     print(f"Annotated video written to {output_path}")
+    if "image_path" in report["heatmap"]:
+        print(f"Foot-traffic hex heatmap written to {heatmap_image_path} "
+              f"({report['heatmap']['occupied_cells']} occupied cells, "
+              f"{report['heatmap']['total_visits']} visits)")
 
     os.makedirs(os.path.dirname(metrics_out_path), exist_ok=True)
     with open(metrics_out_path, "w") as f:
@@ -289,6 +319,9 @@ if __name__ == "__main__":
                          help="Label for this run in the metrics history (e.g. 'segment-1')")
     parser.add_argument("--no-history", action="store_true",
                          help="Don't log this run into metrics_history.db")
+    parser.add_argument("--heatmap-hex-size", type=int, default=40,
+                         help="Circumradius in pixels of each hex cell in the foot-traffic "
+                              "heatmap (smaller = finer-grained). Default: 40")
     args = parser.parse_args()
 
     output_path = os.path.normpath(args.output)
@@ -302,4 +335,5 @@ if __name__ == "__main__":
         run_demographics=not args.no_demographics,
         demographics_backend=args.demographics_backend,
         start_frame=args.start_frame, segment_label=args.segment_label,
-        log_history=not args.no_history)
+        log_history=not args.no_history,
+        heatmap_hex_size=args.heatmap_hex_size)
