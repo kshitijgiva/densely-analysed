@@ -36,10 +36,12 @@ from reid import OSNetReID
 from identity import PersonIdentity, match_identity, needs_demographic_retry
 from utils import draw_boxes
 from validate_pipeline import percentiles, collect_similarity_pairs
+import metrics_store
 
 
 def run(video_source, output_path, max_frames, metrics_out_path,
-        run_demographics=True, demographics_backend="mivolo-body"):
+        run_demographics=True, demographics_backend="mivolo-body",
+        start_frame=0, segment_label=None, log_history=True):
     detection_model = load_detection_model()
     reid_model = OSNetReID()
 
@@ -53,6 +55,9 @@ def run(video_source, output_path, max_frames, metrics_out_path,
     cap = cv2.VideoCapture(video_source)
     if not cap.isOpened():
         raise FileNotFoundError(f"Could not open video source: {video_source}")
+
+    if start_frame:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
 
     fps = cap.get(cv2.CAP_PROP_FPS) or 25
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -130,7 +135,7 @@ def run(video_source, output_path, max_frames, metrics_out_path,
                     print(f"[frame {frame_idx}] New identity {identity_id} (track {track_id})")
 
             if run_demographics:
-                video_time = frame_idx / fps
+                video_time = (start_frame + frame_idx) / fps
                 identity = identities[identity_id]
                 needs_gender, needs_age = needs_demographic_retry(identity, video_time)
                 if needs_gender or needs_age:
@@ -257,6 +262,12 @@ def run(video_source, output_path, max_frames, metrics_out_path,
         json.dump(report, f, indent=2)
     print(f"Metrics report written to {metrics_out_path}")
 
+    if log_history:
+        metrics_store.log_run(report, video_source, segment_label)
+        print(f"Logged to run history: {metrics_store.DB_PATH}")
+
+    return report
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -272,6 +283,12 @@ if __name__ == "__main__":
                          default="mivolo-body",
                          help="mivolo-body: transformers mivolo_v2, body-only (default). "
                               "mivolo-official: official repo's own detector + fused face+body model, heavier.")
+    parser.add_argument("--start-frame", type=int, default=0,
+                         help="Seek to this frame before processing - lets you sample different segments of a video")
+    parser.add_argument("--segment-label", default=None,
+                         help="Label for this run in the metrics history (e.g. 'segment-1')")
+    parser.add_argument("--no-history", action="store_true",
+                         help="Don't log this run into metrics_history.db")
     args = parser.parse_args()
 
     output_path = os.path.normpath(args.output)
@@ -283,4 +300,6 @@ if __name__ == "__main__":
 
     run(args.input, output_path, args.max_frames, metrics_out_path,
         run_demographics=not args.no_demographics,
-        demographics_backend=args.demographics_backend)
+        demographics_backend=args.demographics_backend,
+        start_frame=args.start_frame, segment_label=args.segment_label,
+        log_history=not args.no_history)
