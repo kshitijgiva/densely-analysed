@@ -1,9 +1,11 @@
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import psycopg2
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.encoders import ENCODERS_BY_TYPE
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -24,6 +26,21 @@ from db.postgres import (
     list_significant_frames,
     upsert_store,
 )
+
+_IST = ZoneInfo("Asia/Kolkata")
+
+
+def _format_datetime_ist(dt: datetime) -> str:
+    """Render every datetime in API responses as IST, dropping sub-second noise."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(_IST).strftime("%Y-%m-%d %H:%M:%S IST")
+
+
+# fastapi's jsonable_encoder consults this shared dict for every response in the
+# app (dict/list returns included, not just Pydantic models) - patching it here
+# is the single choke point that affects every endpoint's datetime fields.
+ENCODERS_BY_TYPE[datetime] = _format_datetime_ist
 
 app = FastAPI(title="Store CCTV Analytics API")
 
