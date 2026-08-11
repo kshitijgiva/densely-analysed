@@ -44,9 +44,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-_TIMEFRAME_HOURS = {"1h": 1, "4h": 4, "1d": 24, "2d": 48}
-
-
 class StoreIn(BaseModel):
     store_id: str
     store: str
@@ -65,20 +62,11 @@ class ChatIn(BaseModel):
 
 
 def _default_window(start: Optional[datetime], end: Optional[datetime]):
-    """Default to the last 24 hours when no window is given."""
+    """Default to everything on record when no window is given - stored
+    footage/reports predate any recent window, so defaulting to e.g. the last
+    24 hours would filter out all of it (see /overview's timeframe fix)."""
     end = end or datetime.now(timezone.utc)
-    start = start or end - timedelta(hours=24)
-    return start, end
-
-
-def _timeframe_window(timeframe: str):
-    if timeframe not in _TIMEFRAME_HOURS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid timeframe '{timeframe}'. Use one of {sorted(_TIMEFRAME_HOURS)}.",
-        )
-    end = datetime.now(timezone.utc)
-    start = end - timedelta(hours=_TIMEFRAME_HOURS[timeframe])
+    start = start or datetime.min.replace(tzinfo=timezone.utc)
     return start, end
 
 
@@ -184,8 +172,12 @@ async def overview(
 ):
     # FE often sends ?store=; accept both, prefer store_id when both are set.
     store_id = store_id or store
-    start, end = _timeframe_window(timeframe)
-    calculated_at = datetime.now(timezone.utc)
+    # timeframe filtering is disabled for now - stored footage/reports predate
+    # every supported window, so filtering by it always returns empty. Pull
+    # everything on record instead until there's current data to window over.
+    start = datetime.min.replace(tzinfo=timezone.utc)
+    end = datetime.now(timezone.utc)
+    calculated_at = end
 
     footfall = _run_query(get_footfall_count, store_id, start, end)
     dwell = _run_query(get_average_dwell_seconds, store_id, start, end)
