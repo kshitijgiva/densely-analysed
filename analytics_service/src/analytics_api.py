@@ -55,6 +55,10 @@ class AnalysisRequest(BaseModel):
     store_id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
     camera_id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
     demographics: bool = True
+    # Wall-clock time when the video recording starts. Entry/exit timestamps are
+    # then run_start + frame_idx/fps across the video length. ISO-8601, e.g.
+    # "2026-08-07T10:00:00+05:30". If omitted, falls back to (now - duration).
+    start_time: datetime | None = None
     max_sampled_frames: int | None = Field(default=None, gt=0)
     reid_threshold: float | None = Field(
         default=None,
@@ -64,6 +68,14 @@ class AnalysisRequest(BaseModel):
         "using matching --sample-frames/--sample-window-seconds if footfall still looks "
         "inflated (or reduced) on your footage, and pass the suggested value here.",
     )
+
+
+def _normalize_start_time(start_time: datetime | None) -> datetime | None:
+    if start_time is None:
+        return None
+    if start_time.tzinfo is None:
+        return start_time.replace(tzinfo=timezone.utc)
+    return start_time.astimezone(timezone.utc)
 
 
 def _validate_google_drive_url(url: str) -> None:
@@ -130,9 +142,11 @@ def _process_job(job_id: str, request: AnalysisRequest) -> None:
         result = run(**run_kwargs)
 
         _update_job(job_id, status="persisting")
-        run_start = datetime.now(timezone.utc) - timedelta(
-            seconds=result["source_duration_seconds"]
+        duration_s = result["source_duration_seconds"]
+        run_start = _normalize_start_time(request.start_time) or (
+            datetime.now(timezone.utc) - timedelta(seconds=duration_s)
         )
+        run_end = run_start + timedelta(seconds=duration_s)
         persisted = persist_identities(
             result["identities"],
             request.store_id,
@@ -165,6 +179,9 @@ def _process_job(job_id: str, request: AnalysisRequest) -> None:
             metrics=result["report"],
             metrics_path=str(metrics_path),
             heatmap_url=heatmap_url,
+            video_start_time=run_start,
+            video_end_time=run_end,
+            video_duration_seconds=duration_s,
         )
     except Exception as exc:
         _update_job(
@@ -206,6 +223,7 @@ def create_analysis_job(request: AnalysisRequest):
             "store_id": request.store_id,
             "camera_id": request.camera_id,
             "sampling": "3 frames per 10 seconds",
+            "video_start_time": _normalize_start_time(request.start_time),
         }
     executor.submit(_process_job, job_id, request)
     return jobs[job_id]
