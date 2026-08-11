@@ -1,14 +1,19 @@
 import os
+import threading
 
 import psycopg2
 from psycopg2.extras import Json, RealDictCursor
+from psycopg2.pool import ThreadedConnectionPool
+
+_pool = None
+_pool_lock = threading.Lock()
 
 
-def get_connection():
+def _connect_kwargs():
     # Prefer a full URL (Railway / Prisma) when set; else discrete DB_* vars.
     database_url = os.environ.get("DATABASE_URL")
     if database_url:
-        return psycopg2.connect(database_url)
+        return {"dsn": database_url}
 
     kwargs = dict(
         dbname=os.environ.get("DB_NAME", "cctv_analytics"),
@@ -20,12 +25,30 @@ def get_connection():
     sslmode = os.environ.get("DB_SSLMODE")
     if sslmode:
         kwargs["sslmode"] = sslmode
-    return psycopg2.connect(**kwargs)
+    return kwargs
+
+
+def get_connection():
+    return psycopg2.connect(**_connect_kwargs())
+
+
+def _get_pool():
+    # Lazy singleton: every _execute() call used to open its own TCP/TLS
+    # connection to the (often remote, e.g. Prisma-pooled) DB - a pool reuses
+    # a handful of long-lived connections instead of paying that handshake
+    # on every query.
+    global _pool
+    if _pool is None:
+        with _pool_lock:
+            if _pool is None:
+                _pool = ThreadedConnectionPool(1, 10, **_connect_kwargs())
+    return _pool
 
 
 def _execute(query, params=None, fetch=None):
     """fetch: None (no return), 'one', or 'all'."""
-    conn = get_connection()
+    pool = _get_pool()
+    conn = pool.getconn()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(query, params)
@@ -36,8 +59,11 @@ def _execute(query, params=None, fetch=None):
                 result = cur.fetchall()
         conn.commit()
         return result
+    except Exception:
+        conn.rollback()
+        raise
     finally:
-        conn.close()
+        pool.putconn(conn)
 
 
 # --- stores -----------------------------------------------------------------

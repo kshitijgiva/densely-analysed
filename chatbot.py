@@ -7,9 +7,11 @@ Optional LiteLLM tool-calling is available with CHAT_MODE=llm if your proxy
 is reachable; it is not needed for the /chat endpoint to work.
 """
 import json
+import logging
 import os
 import re
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -24,11 +26,27 @@ from db.postgres import (
 
 load_dotenv()
 
+logger = logging.getLogger(__name__)
+
 CHAT_MODE = os.environ.get("CHAT_MODE", "simple").lower()  # simple | llm
 LITELLM_BASE_URL = os.environ.get("LITELLM_BASE_URL", "https://litellm.internal.givadiva.co")
 LITELLM_API_KEY = os.environ.get("LITELLM_API_KEY")
 LITELLM_MODEL = os.environ.get("LITELLM_MODEL", "gpt-4o")
 MAX_TOOL_ROUNDS = 5
+MAX_HISTORY_MESSAGES = 20  # ~10 user/assistant turns - keeps prompt size and the /chat payload bounded
+
+_IST = ZoneInfo("Asia/Kolkata")
+
+
+def _json_default(obj):
+    """json.dumps default= handler - keeps LLM-facing timestamps in the same
+    IST format the API responses use (see api.py's ENCODERS_BY_TYPE patch)."""
+    if isinstance(obj, datetime):
+        if obj.tzinfo is None:
+            obj = obj.replace(tzinfo=timezone.utc)
+        return obj.astimezone(_IST).strftime("%Y-%m-%d %H:%M:%S IST")
+    return str(obj)
+
 
 _STORE_RE = re.compile(r"\b(store[_-]?[a-z0-9]+)\b", re.I)
 _IDENTIFY_RE = re.compile(
@@ -70,12 +88,27 @@ def _resolve_store_id(text: str):
         return stores[0]["store_id"]
 
     lower = text.lower()
-    for store in stores:
+    # Longest name first, so "HSR Layout" is checked (and wins) before a
+    # shorter "HSR" store whose name is just a substring of it.
+    candidates = sorted(
+        stores,
+        key=lambda s: max(len(s["store_id"]), len(s.get("store") or "")),
+        reverse=True,
+    )
+    for store in candidates:
         sid = store["store_id"]
         name = (store.get("store") or "").lower()
         if sid.lower() in lower or (name and name in lower):
             return sid
     return None
+
+
+def _trim_history(history):
+    """Cap stored turns so prompt size (llm mode) and /chat payload size
+    (both modes) don't grow unbounded over a long conversation."""
+    if not history:
+        return history
+    return history[-MAX_HISTORY_MESSAGES:]
 
 
 def _fmt_breakdown(label, mapping):
@@ -143,6 +176,7 @@ def _simple_chat(message: str, history=None):
             "men",
             "age",
             "person",
+            "visit",
             "entry",
             "exit",
             "log",
@@ -237,7 +271,16 @@ def _llm_chat(message, history=None):
         "content": (
             "You are an analytics assistant for store CCTV footfall/demographics. "
             f"Current UTC time is {datetime.now(timezone.utc).isoformat()}. "
-            "Only use tool results. Never invent numbers. Never identify individuals."
+            "Only use tool results. Never invent numbers. Never identify individuals. "
+            "If the user does not specify a time range, use the last 24 hours "
+            "(start = current time minus 24h, end = current time) - do not guess "
+            "an arbitrary date range. When comparing multiple stores, use the exact "
+            "same start/end window for every store so the comparison is valid. "
+            "The tools only report a total count for a given window - there is no "
+            "tool to find when a peak/maximum occurred. If asked something the "
+            "available tools cannot answer (e.g. 'when was footfall highest'), say "
+            "so directly instead of guessing a window and reporting its count as if "
+            "it were the answer."
         ),
     }
     tools = [
@@ -308,6 +351,59 @@ def _llm_chat(message, history=None):
         )(*_window(start, end)),
     }
 
+    client = _get_client()
+    messages = [system] + list(history) + [{"role": "user", "content": message}]
+
+    for _ in range(MAX_TOOL_ROUNDS):
+        response = client.chat.completions.create(
+            model=LITELLM_MODEL,
+            messages=messages,
+            tools=tools,
+        )
+        reply = response.choices[0].message
+        tool_calls = reply.tool_calls
+        if not tool_calls:
+            answer = reply.content or ""
+            new_history = history + [
+                {"role": "user", "content": message},
+                {"role": "assistant", "content": answer},
+            ]
+            return answer, new_history
+
+        messages.append(
+            {
+                "role": "assistant",
+                "content": reply.content,
+                "tool_calls": [tc.model_dump() for tc in tool_calls],
+            }
+        )
+        for tc in tool_calls:
+            name = tc.function.name
+            try:
+                args = json.loads(tc.function.arguments or "{}")
+            except json.JSONDecodeError:
+                args = {}
+            if not isinstance(args, dict):
+                # some models (e.g. Groq's Llama) emit the literal string "null"
+                # for no-arg tools instead of "{}" - json.loads succeeds but
+                # yields None, which isn't a valid **kwargs mapping.
+                args = {}
+            fn = dispatch.get(name)
+            try:
+                result = fn(**args) if fn is not None else {"error": f"unknown tool {name}"}
+            except Exception as e:
+                result = {"error": str(e)}
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": json.dumps(result, default=_json_default),
+                }
+            )
+
+    raise RuntimeError(f"LLM chat did not produce an answer within {MAX_TOOL_ROUNDS} tool-call rounds")
+
+
 _client = None
 
 
@@ -335,17 +431,19 @@ def _template_narrative(kpis, store_id=None):
 
 def generate_narrative(kpis, store_id=None):
     """One-sentence summary of /overview or /reports KPIs for the AI narrative
-    card. Tries the LiteLLM client; falls back to a templated sentence built
-    straight from the numbers if no key is set or the call fails."""
+    card. Tries the LiteLLM client when CHAT_MODE=llm; falls back to a
+    templated sentence built straight from the numbers otherwise (or if the
+    call fails), so /overview stays a fast DB-only read under the default
+    CHAT_MODE=simple instead of making a live LLM call on every request."""
     fallback = _template_narrative(kpis, store_id)
-    if not LITELLM_API_KEY:
+    if CHAT_MODE != "llm" or not LITELLM_API_KEY:
         return fallback
     try:
         client = _get_client()
         prompt = (
             "Write one short, plain-English sentence (max 30 words) summarizing "
             f"these store analytics KPIs for {store_id or 'the selected stores'}: "
-            f"{json.dumps(kpis, default=str)}. Only use the numbers given - do not "
+            f"{json.dumps(kpis, default=_json_default)}. Only use the numbers given - do not "
             "invent figures that aren't present."
         )
         response = client.chat.completions.create(
@@ -356,22 +454,27 @@ def generate_narrative(kpis, store_id=None):
         text = response.choices[0].message.content
         return text.strip() if text else fallback
     except Exception:
+        logger.exception("LiteLLM narrative generation failed, using template fallback")
         return fallback
 
 
 def chat(message, history=None):
     """Run one user turn. Returns (answer, new_history)."""
+    history = _trim_history(history or [])
     if CHAT_MODE == "llm":
         try:
-            return _llm_chat(message, history)
+            answer, new_history = _llm_chat(message, history)
+            return answer, _trim_history(new_history)
         except Exception as e:
             # Fall back so /chat still works when the proxy is down.
+            logger.exception("LiteLLM chat failed, falling back to simple mode")
             answer, hist = _simple_chat(message, history)
             return (
                 f"(LLM unavailable: {e}. Using simple mode.)\n{answer}",
-                hist,
+                _trim_history(hist),
             )
-    return _simple_chat(message, history)
+    answer, new_history = _simple_chat(message, history)
+    return answer, _trim_history(new_history)
 
 
 if __name__ == "__main__":

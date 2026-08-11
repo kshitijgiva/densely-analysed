@@ -13,9 +13,11 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 import gdown
 from fastapi import FastAPI, HTTPException, status
+from fastapi.encoders import ENCODERS_BY_TYPE
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -30,6 +32,21 @@ SAMPLE_FRAMES = 3
 SAMPLE_WINDOW_SECONDS = 10
 RESULTS_DIR = Path(__file__).resolve().parents[1] / "results" / "jobs"
 MAX_WORKERS = int(os.environ.get("ANALYTICS_MAX_WORKERS", "1"))
+
+_IST = ZoneInfo("Asia/Kolkata")
+
+
+def _format_datetime_ist(dt: datetime) -> str:
+    """Render every datetime in API responses as IST, dropping sub-second noise."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(_IST).strftime("%Y-%m-%d %H:%M:%S IST")
+
+
+# fastapi's jsonable_encoder consults this shared dict for every response in the
+# app (dict/list returns included, not just Pydantic models) - patching it here
+# is the single choke point that affects every endpoint's datetime fields.
+ENCODERS_BY_TYPE[datetime] = _format_datetime_ist
 
 app = FastAPI(title="CCTV Video Analysis Jobs API")
 
