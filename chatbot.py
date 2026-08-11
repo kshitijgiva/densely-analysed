@@ -11,6 +11,7 @@ import logging
 import os
 import re
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -33,6 +34,19 @@ LITELLM_API_KEY = os.environ.get("LITELLM_API_KEY")
 LITELLM_MODEL = os.environ.get("LITELLM_MODEL", "gpt-4o")
 MAX_TOOL_ROUNDS = 5
 MAX_HISTORY_MESSAGES = 20  # ~10 user/assistant turns - keeps prompt size and the /chat payload bounded
+
+_IST = ZoneInfo("Asia/Kolkata")
+
+
+def _json_default(obj):
+    """json.dumps default= handler - keeps LLM-facing timestamps in the same
+    IST format the API responses use (see api.py's ENCODERS_BY_TYPE patch)."""
+    if isinstance(obj, datetime):
+        if obj.tzinfo is None:
+            obj = obj.replace(tzinfo=timezone.utc)
+        return obj.astimezone(_IST).strftime("%Y-%m-%d %H:%M:%S IST")
+    return str(obj)
+
 
 _STORE_RE = re.compile(r"\b(store[_-]?[a-z0-9]+)\b", re.I)
 _IDENTIFY_RE = re.compile(
@@ -383,7 +397,7 @@ def _llm_chat(message, history=None):
                 {
                     "role": "tool",
                     "tool_call_id": tc.id,
-                    "content": json.dumps(result, default=str),
+                    "content": json.dumps(result, default=_json_default),
                 }
             )
 
@@ -429,7 +443,7 @@ def generate_narrative(kpis, store_id=None):
         prompt = (
             "Write one short, plain-English sentence (max 30 words) summarizing "
             f"these store analytics KPIs for {store_id or 'the selected stores'}: "
-            f"{json.dumps(kpis, default=str)}. Only use the numbers given - do not "
+            f"{json.dumps(kpis, default=_json_default)}. Only use the numbers given - do not "
             "invent figures that aren't present."
         )
         response = client.chat.completions.create(
