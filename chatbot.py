@@ -417,10 +417,12 @@ def _template_narrative(kpis, store_id=None):
 
 def generate_narrative(kpis, store_id=None):
     """One-sentence summary of /overview or /reports KPIs for the AI narrative
-    card. Tries the LiteLLM client; falls back to a templated sentence built
-    straight from the numbers if no key is set or the call fails."""
+    card. Tries the LiteLLM client when CHAT_MODE=llm; falls back to a
+    templated sentence built straight from the numbers otherwise (or if the
+    call fails), so /overview stays a fast DB-only read under the default
+    CHAT_MODE=simple instead of making a live LLM call on every request."""
     fallback = _template_narrative(kpis, store_id)
-    if not LITELLM_API_KEY:
+    if CHAT_MODE != "llm" or not LITELLM_API_KEY:
         return fallback
     try:
         client = _get_client()
