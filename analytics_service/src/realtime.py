@@ -1,3 +1,4 @@
+import argparse
 import cv2
 import time
 from detection import load_detection_model, detect_people
@@ -12,12 +13,33 @@ from identity import (
     demographics_pass_threshold,
 )
 
+parser = argparse.ArgumentParser(description="Local real-time CCTV analytics preview")
+parser.add_argument(
+    "--input",
+    default=VIDEO_SOURCE,
+    help=f"Video path or camera index (default: {VIDEO_SOURCE})",
+)
+parser.add_argument(
+    "--speed",
+    type=float,
+    default=1.0,
+    help="Playback speed multiplier (e.g. 5 = 5x). Limited by model processing time.",
+)
+args = parser.parse_args()
+if args.speed <= 0:
+    raise SystemExit("--speed must be > 0")
+video_source = int(args.input) if str(args.input).isdigit() else args.input
+
 # Initialize models
 detection_model = load_detection_model()
 reid_model = OSNetReID()
-cap = cv2.VideoCapture(VIDEO_SOURCE)
+cap = cv2.VideoCapture(video_source)
+if not cap.isOpened():
+    raise SystemExit(f"Could not open video source: {video_source}")
 fps = cap.get(cv2.CAP_PROP_FPS)
-frame_delay = int(1000 / fps) if fps > 0 else 33
+# Shorter wait → faster playback; at high --speed this often hits the 1ms floor
+# and effective speed is whatever the YOLO/re-id pipeline can sustain.
+frame_delay = max(1, int((1000 / fps) / args.speed)) if fps > 0 else max(1, int(33 / args.speed))
 
 # State management
 identities = {}             # {identity_id: PersonIdentity}
@@ -25,7 +47,7 @@ track_id_to_identity = {}   # {track_id: identity_id}
 identity_counter = 1000     # Start from 1000 to distinguish from track IDs
 loop_count = 0
 
-print(f"Running real-time analytics at {fps:.1f} FPS")
+print(f"Running real-time analytics at {fps:.1f} FPS source, {args.speed:g}x playback")
 print("Press 'q' to quit, 'r' to reset loop")
 
 while True:

@@ -76,6 +76,16 @@ class AnalysisRequest(BaseModel):
     # then run_start + frame_idx/fps across the video length. ISO-8601, e.g.
     # "2026-08-07T10:00:00+05:30". If omitted, falls back to (now - duration).
     start_time: datetime | None = None
+    sample_frames: int = Field(
+        default=SAMPLE_FRAMES,
+        gt=0,
+        description="Evenly spaced frames to process per sample_window_seconds.",
+    )
+    sample_window_seconds: float = Field(
+        default=SAMPLE_WINDOW_SECONDS,
+        gt=0,
+        description="Sampling window size in seconds.",
+    )
     max_sampled_frames: int | None = Field(default=None, gt=0)
     reid_threshold: float | None = Field(
         default=None,
@@ -113,6 +123,7 @@ def _process_job(job_id: str, request: AnalysisRequest) -> None:
     # Keep API startup light; load PyTorch/YOLO only when a worker starts a job.
     from render_tracked_video import run
     from persist import persist_identities, persist_heatmap
+    from validate_pipeline import estimate_reid_threshold
 
     temp_dir = Path(tempfile.mkdtemp(prefix=f"cctv-{job_id}-"))
     input_path = temp_dir / "input_video"
@@ -139,6 +150,25 @@ def _process_job(job_id: str, request: AnalysisRequest) -> None:
             )
 
         RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+
+        reid_threshold = request.reid_threshold
+        reid_threshold_source = "explicit"
+        if reid_threshold is None:
+            _update_job(job_id, status="calibrating")
+            # This footage's own same-person/different-person similarity spread
+            # varies by lighting/crowd/camera - a fixed global threshold
+            # (REID_THRESHOLD_SPARSE) fragments real visitors into extra
+            # identities on footage it wasn't tuned for. Estimate one from this
+            # video itself (same detect+track+reid pass validate_pipeline.py
+            # uses, just without its CLI/CSV side effects) before falling back.
+            estimated = estimate_reid_threshold(
+                str(input_path),
+                sample_frames=request.sample_frames,
+                sample_window_seconds=request.sample_window_seconds,
+            )
+            reid_threshold = estimated if estimated is not None else REID_THRESHOLD_SPARSE
+            reid_threshold_source = "auto_calibrated" if estimated is not None else "default_fallback"
+
         _update_job(job_id, status="analyzing")
         run_kwargs = dict(
             video_source=str(input_path),
@@ -149,12 +179,10 @@ def _process_job(job_id: str, request: AnalysisRequest) -> None:
             use_chroma=True,
             store_id=request.store_id,
             camera_id=request.camera_id,
-            sample_frames=SAMPLE_FRAMES,
-            sample_window_seconds=SAMPLE_WINDOW_SECONDS,
+            sample_frames=request.sample_frames,
+            sample_window_seconds=request.sample_window_seconds,
             write_video=False,
-            reid_threshold=request.reid_threshold
-            if request.reid_threshold is not None
-            else REID_THRESHOLD_SPARSE,
+            reid_threshold=reid_threshold,
         )
         result = run(**run_kwargs)
 
@@ -199,6 +227,8 @@ def _process_job(job_id: str, request: AnalysisRequest) -> None:
             video_start_time=run_start,
             video_end_time=run_end,
             video_duration_seconds=duration_s,
+            reid_threshold=reid_threshold,
+            reid_threshold_source=reid_threshold_source,
         )
     except Exception as exc:
         _update_job(
@@ -239,7 +269,10 @@ def create_analysis_job(request: AnalysisRequest):
             "created_at": datetime.now(timezone.utc),
             "store_id": request.store_id,
             "camera_id": request.camera_id,
-            "sampling": "3 frames per 10 seconds",
+            "sampling": (
+                f"{request.sample_frames} frames per "
+                f"{request.sample_window_seconds:g} seconds"
+            ),
             "video_start_time": _normalize_start_time(request.start_time),
         }
     executor.submit(_process_job, job_id, request)

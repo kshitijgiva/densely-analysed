@@ -23,6 +23,7 @@ class PersonIdentity:
         self.appearances = []  # List of (features, timestamp)
         self.first_seen = first_seen if first_seen is not None else time.time()
         self.last_seen = self.first_seen
+        self._was_new = False  # set True by the caller that minted this as a brand-new identity
 
     def add_appearance(self, features, timestamp):
         """Add new appearance to history"""

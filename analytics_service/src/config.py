@@ -21,6 +21,17 @@ FRAME_SKIP = 5  # Process every 5th frame for performance
 MIN_CONFIDENCE = 0.5  # Minimum detection confidence
 TRACKER_CONFIG = "bytetrack.yaml"  # Ultralytics tracker config (ByteTrack)
 
+# Detector weights - override via ANALYTICS_DETECTION_WEIGHTS to A/B a
+# fine-tuned checkpoint against the stock COCO weights without code changes.
+# NOTE: analytics_service/finetune_mannequin_filter.py fine-tunes YOLOv8n on
+# hard-negative mannequin photos to reduce false "person" hits, but the
+# checkpoint produced from the initial ~45-photo Commons dataset collapsed
+# detection confidence to near-zero on real people too (see the fine-tune
+# plan's evaluate step) - it is NOT safe to point this at yet. Re-run
+# finetune_mannequin_filter.py with a much larger/more balanced dataset
+# before trying this env var against production footage.
+DETECTION_WEIGHTS = os.environ.get("ANALYTICS_DETECTION_WEIGHTS", "yolov8n.pt")
+
 # Re-identification (OSNet via torchreid)
 REID_MODEL_NAME = "osnet_x1_0"
 REID_MODEL_CHECKPOINT = "osnet_x1_0_market1501.pt"  # market1501-trained weights, auto-downloaded on first run
@@ -67,5 +78,20 @@ DEMOGRAPHICS_MODEL = "body"  # Options: 'face', 'body', 'hybrid' - only 'body' i
 # 0.97 in the commit that added tests/test_identity_confidence.py, which
 # still asserts 0.80 - keep this in sync with that test.
 MIN_DEMOGRAPHICS_CONFIDENCE = 0.80
+
+# Static-object filtering: a resolved identity (post re-id, so ByteTrack
+# fragments across sample-window gaps are already merged) that sits in
+# roughly the same spot for a large chunk of the clip is almost certainly a
+# mannequin or a printed/on-screen image of a person, not a live shopper -
+# YOLO+ByteTrack+OSNet have no notion of "alive" and will happily detect,
+# track, and re-id a completely static object. See static_objects.py.
+# These are initial heuristic defaults, NOT yet validated against real
+# footage - re-tune against actual store clips with known mannequins/posters
+# the same way REID_THRESHOLD_SPARSE above was tuned via validate_pipeline.py,
+# by inspecting the "filtering" section of the job's metrics report.
+STATIC_OBJECT_MIN_SPAN_SECONDS = 45          # must persist across this much of the clip
+STATIC_OBJECT_MAX_DISPLACEMENT_RATIO = 0.03  # foot-point bounding extent / frame diagonal
+STATIC_OBJECT_MIN_APPEARANCES = 4            # need enough samples for a meaningful signal
+
 VERTEX_PROJECT_ID = "visual-similarity-459311"
 VERTEX_PROJECT_LOCATION = "us-central1"

@@ -40,7 +40,11 @@ def cosine_sim(a, b):
     return float((a * b).sum())  # both vectors are L2-normalized by OSNetReID
 
 
-def run(video_source, max_frames, threshold, sample_frames=0, sample_window_seconds=10):
+def collect_detections(video_source, max_frames, sample_frames=0, sample_window_seconds=10,
+                        verbose=True):
+    """Run detect+track+reid over a video and return (track_stats, detections),
+    with no reporting/printing side effects beyond progress if `verbose`.
+    `detections` is a list of (frame_idx, track_id, embedding, bbox)."""
     if sample_frames < 0:
         raise ValueError("sample_frames cannot be negative")
     if sample_frames > 0 and sample_window_seconds <= 0:
@@ -58,9 +62,10 @@ def run(video_source, max_frames, threshold, sample_frames=0, sample_window_seco
     sample_interval = 1.0
     if sample_frames > 0:
         sample_interval = fps * sample_window_seconds / sample_frames
-        print(f"Sampling {sample_frames} frames per {sample_window_seconds}s "
-              f"(every {sample_interval:.1f} source frames) - matches the sparse-sampling "
-              f"path in render_tracked_video.py/analytics_api.py")
+        if verbose:
+            print(f"Sampling {sample_frames} frames per {sample_window_seconds}s "
+                  f"(every {sample_interval:.1f} source frames) - matches the sparse-sampling "
+                  f"path in render_tracked_video.py/analytics_api.py")
 
     track_stats = {}   # track_id -> {"first": frame_idx, "last": frame_idx, "count": int}
     detections = []    # (frame_idx, track_id, embedding, bbox)
@@ -101,12 +106,47 @@ def run(video_source, max_frames, threshold, sample_frames=0, sample_window_seco
         processed_frames += 1
         if sample_frames == 0:
             frame_idx += 1
-        if processed_frames % 100 == 0:
+        if verbose and processed_frames % 100 == 0:
             print(f"...processed {processed_frames} frames")
 
     cap.release()
     elapsed = time.time() - start
-    print(f"\nProcessed {processed_frames} frames in {elapsed:.1f}s ({processed_frames / elapsed:.1f} FPS)")
+    if verbose:
+        print(f"\nProcessed {processed_frames} frames in {elapsed:.1f}s ({processed_frames / elapsed:.1f} FPS)")
+
+    return track_stats, detections
+
+
+def suggest_threshold(same_id_sims, diff_id_sims, min_pairs=20, clamp=(0.5, 0.95)):
+    """Midpoint-of-percentiles heuristic for a re-id threshold from this
+    footage's own similarity distributions. Returns None when either list has
+    fewer than `min_pairs` entries - too little signal from this footage to
+    trust a suggestion over a known-reasonable fallback."""
+    if len(same_id_sims) < min_pairs or len(diff_id_sims) < min_pairs:
+        return None
+    same_p = percentiles(same_id_sims)
+    diff_p = percentiles(diff_id_sims)
+    suggested = (same_p[5] + diff_p[95]) / 2
+    return max(clamp[0], min(clamp[1], suggested))
+
+
+def estimate_reid_threshold(video_source, sample_frames, sample_window_seconds,
+                             max_frames=None, min_pairs=20):
+    """Calibration entry point for callers (e.g. analytics_api.py) that just
+    want a number, with no CLI printing or CSV side effects."""
+    _, detections = collect_detections(
+        video_source, max_frames, sample_frames=sample_frames,
+        sample_window_seconds=sample_window_seconds, verbose=False,
+    )
+    same_id_sims, diff_id_sims = collect_similarity_pairs(detections)
+    return suggest_threshold(same_id_sims, diff_id_sims, min_pairs=min_pairs)
+
+
+def run(video_source, max_frames, threshold, sample_frames=0, sample_window_seconds=10):
+    track_stats, detections = collect_detections(
+        video_source, max_frames, sample_frames=sample_frames,
+        sample_window_seconds=sample_window_seconds,
+    )
 
     report_m1(track_stats)
     same_id_sims, diff_id_sims = collect_similarity_pairs(detections)

@@ -1,9 +1,9 @@
 from ultralytics import YOLO
-from config import TRACKER_CONFIG, MIN_CONFIDENCE, _select_device
+from config import TRACKER_CONFIG, MIN_CONFIDENCE, DETECTION_WEIGHTS, _select_device
 
 def load_detection_model():
     """Load YOLO model with device optimization"""
-    model = YOLO('yolov8n.pt').to(_select_device())
+    model = YOLO(DETECTION_WEIGHTS).to(_select_device())
     return model
 
 def detect_people(model, frame):

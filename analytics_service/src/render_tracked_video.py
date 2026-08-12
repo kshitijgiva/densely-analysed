@@ -41,7 +41,8 @@ from identity import (
 )
 from utils import draw_boxes
 from validate_pipeline import percentiles, collect_similarity_pairs
-from heatmap import HeatmapAccumulator, render_heatmap
+from heatmap import HeatmapAccumulator, build_accumulator_from_detections, render_heatmap
+from static_objects import compute_static_identity_ids
 import metrics_store
 
 
@@ -248,6 +249,7 @@ def run(video_source, output_path, max_frames, metrics_out_path,
                         identity_id = identity_counter
                         identity_counter += 1
                         identity = PersonIdentity(identity_id, first_seen=frame_idx)
+                        identity._was_new = True
                         identity.add_appearance(features, frame_idx)
                         if gender_result is not None:
                             video_time = frame_idx / fps
@@ -325,6 +327,30 @@ def run(video_source, output_path, max_frames, metrics_out_path,
     if writer is not None:
         writer.release()
 
+    static_identity_ids = compute_static_identity_ids(
+        track_id_to_identity, detections_log, width, height, fps
+    )
+    if static_identity_ids:
+        excluded_track_ids = {
+            tid for tid, iid in track_id_to_identity.items() if iid in static_identity_ids
+        }
+        new_identity_count -= sum(
+            1 for iid in static_identity_ids if identities[iid]._was_new
+        )
+        for iid in static_identity_ids:
+            identities.pop(iid, None)
+        detections_log = [e for e in detections_log if e[1] not in excluded_track_ids]
+        track_stats = {
+            tid: s for tid, s in track_stats.items() if tid not in excluded_track_ids
+        }
+        heatmap_acc = build_accumulator_from_detections(
+            detections_log, width, height, hex_size=heatmap_acc.hex_size
+        )
+        print(
+            f"Filtered {len(static_identity_ids)} static (non-moving) detection(s) - "
+            f"likely mannequin/poster/screen - identity ids: {sorted(static_identity_ids)}"
+        )
+
     if chroma is not None:
         for identity in identities.values():
             representative = identity.representative_embedding()
@@ -395,6 +421,10 @@ def run(video_source, output_path, max_frames, metrics_out_path,
             "chroma_matches": chroma_match_count,
         },
         "demographics_m3": demographics_m3,
+        "filtering": {
+            "static_objects_removed": len(static_identity_ids),
+            "removed_identity_ids": sorted(static_identity_ids),
+        },
         "heatmap": {
             "hex_size": heatmap_acc.hex_size,
             "occupied_cells": len(heatmap_acc.counts),
