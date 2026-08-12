@@ -118,6 +118,16 @@ def _fmt_breakdown(label, mapping):
     return ", ".join(parts)
 
 
+def _fmt_dt(dt):
+    if dt is None:
+        return "unknown"
+    return dt.strftime("%b %d, %Y %I:%M %p UTC").replace(" 0", " ")
+
+
+def _fmt_window(start, end):
+    return f"{_fmt_dt(start)} to {_fmt_dt(end)}"
+
+
 def _simple_chat(message: str, history=None):
     history = history or []
     text = (message or "").strip()
@@ -203,12 +213,12 @@ def _simple_chat(message: str, history=None):
             count = int(gender.get(gender_focus, 0))
             answer = (
                 f"{count} {gender_focus} visitors at {store_id} "
-                f"from {start.isoformat()} to {end.isoformat()} "
+                f"from {_fmt_window(start, end)} "
                 f"(full gender split: {_fmt_breakdown('gender', gender)})."
             )
         else:
             answer = (
-                f"Demographics for {store_id} from {start.isoformat()} to {end.isoformat()}:\n"
+                f"Demographics for {store_id} from {_fmt_window(start, end)}:\n"
                 f"- Gender: {_fmt_breakdown('gender', gender)}\n"
                 f"- Age: {_fmt_breakdown('age', data.get('age_group_breakdown', {}))}"
             )
@@ -226,19 +236,19 @@ def _simple_chat(message: str, history=None):
     ):
         count = get_footfall_count(store_id, start, end)
         answer = (
-            f"Unique footfall for {store_id} from {start.isoformat()} to {end.isoformat()}: "
+            f"Unique footfall for {store_id} from {_fmt_window(start, end)}: "
             f"{count}"
         )
     elif any(k in lower for k in ("entry", "exit", "log")):
         rows = list_entry_exit_logs(store_id, None, start, end, 20) or []
         answer = (
             f"{len(rows)} recent entry/exit events for {store_id} "
-            f"(showing up to 20) between {start.isoformat()} and {end.isoformat()}."
+            f"(showing up to 20) from {_fmt_window(start, end)}."
         )
         if rows:
             sample = rows[0]
             answer += (
-                f" Latest: {sample.get('event_type')} at {sample.get('event_time')} "
+                f" Latest: {sample.get('event_type')} at {_fmt_dt(sample.get('event_time'))} "
                 f"(person_id={sample.get('person_id')})."
             )
     elif "person" in lower or "visit" in lower:
@@ -280,7 +290,10 @@ def _llm_chat(message, history=None):
             "tool to find when a peak/maximum occurred. If asked something the "
             "available tools cannot answer (e.g. 'when was footfall highest'), say "
             "so directly instead of guessing a window and reporting its count as if "
-            "it were the answer."
+            "it were the answer. Tool results include a human-readable 'window' "
+            "field (e.g. 'Aug 6, 2026 8:34 PM UTC to Aug 7, 2026 8:34 PM UTC') - "
+            "use that phrasing in your answer. Never output raw ISO 8601 "
+            "timestamps (e.g. 2026-08-06T20:34:52.595047+00:00)."
         ),
     }
     tools = [
@@ -336,16 +349,14 @@ def _llm_chat(message, history=None):
         "get_footfall": lambda store_id, start=None, end=None: (
             lambda s, e: {
                 "store_id": store_id,
-                "start": s.isoformat(),
-                "end": e.isoformat(),
+                "window": _fmt_window(s, e),
                 "footfall": get_footfall_count(store_id, s, e),
             }
         )(*_window(start, end)),
         "get_demographics": lambda store_id, start=None, end=None: (
             lambda s, e: {
                 "store_id": store_id,
-                "start": s.isoformat(),
-                "end": e.isoformat(),
+                "window": _fmt_window(s, e),
                 **get_demographics_breakdown(store_id, s, e),
             }
         )(*_window(start, end)),
