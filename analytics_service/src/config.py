@@ -33,11 +33,23 @@ TRACKER_CONFIG = "bytetrack.yaml"  # Ultralytics tracker config (ByteTrack)
 DETECTION_WEIGHTS = os.environ.get("ANALYTICS_DETECTION_WEIGHTS", "yolov8n.pt")
 
 # Re-identification (OSNet via torchreid)
-REID_MODEL_NAME = "osnet_x1_0"
-REID_MODEL_CHECKPOINT = "osnet_x1_0_market1501.pt"  # market1501-trained weights, auto-downloaded on first run
+# osnet_ain_x1_0/msmt17 (was osnet_x1_0/market1501): AIN's instance-normalized
+# layers plus MSMT17's larger, more viewpoint/domain-diverse training set give
+# much better cross-domain generalization than the old Market1501 checkpoint,
+# which overfits hard to Market1501-like conditions and degrades sharply on
+# footage that doesn't look like it (real store CCTV, for instance).
+REID_MODEL_NAME = "osnet_ain_x1_0"
+REID_MODEL_CHECKPOINT = "osnet_ain_x1_0_msmt17.pt"  # msmt17-trained AIN weights, auto-downloaded on first run
 REID_WEIGHTS_DIR = os.path.join(os.path.dirname(__file__), "weights")
-REID_THRESHOLD = 0.94  # Cosine similarity threshold for re-identification, tuned via validate_pipeline.py
-                       # (separates same-person p5=0.95 from different-person p95=0.76 on test footage)
+REID_THRESHOLD = 0.92  # Cosine similarity threshold for re-identification, re-tuned for
+                       # osnet_ain_x1_0/msmt17 via validate_pipeline.py on data/raw/samplevideo6.mp4
+                       # (dense, frame-by-frame: same-person p5=0.900, median=0.984; different-person
+                       # p95=0.638, median=0.500 - a much cleaner separation than the old
+                       # osnet_x1_0/market1501 checkpoint had, 0.900 vs 0.638 here vs 0.95 vs 0.76
+                       # before). Swept 0.80-0.94 against one collected detection set: false merges
+                       # stay at 0 for every threshold >=0.92 and jump to 506 at 0.90, so 0.92 is the
+                       # tightest safe value - it catches one more real track merge than 0.94 (231 vs
+                       # 232 identities from 235 tracks) with the same zero false-merge rate.
                        # NOTE: tuned on dense, frame-by-frame footage (consecutive same-person
                        # detections a fraction of a second apart). The sparse-sampling path used
                        # for big videos (render_tracked_video.py/analytics_api.py with
@@ -49,17 +61,23 @@ REID_THRESHOLD = 0.94  # Cosine similarity threshold for re-identification, tune
                        # analysis job's reid_threshold field.
 
 REID_THRESHOLD_SPARSE = 0.85  # Default for analytics_api.py's 3-frames/10s sampling.
-                       # Measured via `validate_pipeline.py --sample-frames 3 --sample-window-seconds 10`
-                       # on data/raw/samplevideo6.mp4: same-person sim p5=0.61, diff-person p95=0.75 -
-                       # the two distributions overlap on this footage, so no single threshold fully
-                       # separates them. 0.85 was chosen from a sweep (with match_identity's same-frame
-                       # exclusion applied - see identity.py) as the point where residual same-frame
-                       # false merges drop to single digits (9/37 tracks) while still resolving some
-                       # fragmentation (37 tracks -> 33 identities); 0.88+ eliminates false merges
-                       # entirely but stops merging fragmented tracks altogether (37 -> 37, no better
-                       # than the dense-tuned 0.94). Re-validate on your own footage/sampling before
-                       # trusting this number, and inspect results/reid_validation_log.csv for
-                       # _FALSE_MERGE rows if footfall still looks wrong.
+                       # Re-measured for osnet_ain_x1_0/msmt17 via
+                       # `validate_pipeline.py --sample-frames 3 --sample-window-seconds 10` on
+                       # data/raw/samplevideo6.mp4: same-person sim p5=0.489, median=0.819;
+                       # different-person p95=0.648, median=0.501. The distributions overlap badly
+                       # here - notably *worse* separation than the old osnet_x1_0/market1501
+                       # checkpoint had at this same sparse setting (which saw same-p5=0.61 vs
+                       # diff-p95=0.75). Swept 0.60-0.90: every value below 0.85 produces double-digit
+                       # to 500+ false merges (e.g. 0.80 -> 24 false merges for only 5 real merges),
+                       # and 0.85/0.90 both land at 0 false merges but ALSO 0 real merges (37/37,
+                       # i.e. no better than skipping re-id entirely on this clip). Kept at 0.85 as
+                       # the "do no harm" choice, but this is a genuinely weaker result than dense
+                       # mode and than the old checkpoint's sparse behavior - osnet_ain_x1_0/msmt17's
+                       # embeddings may be more sensitive to the pose/lighting drift that accumulates
+                       # over a multi-second sampling gap. Don't trust this single-video sweep as
+                       # final: re-validate on more/longer real footage (more tracks and identities
+                       # than this clip's 37) before relying on sparse re-id merging in production,
+                       # and inspect results/reid_validation_log.csv for _FALSE_MERGE rows.
 
 # Short-lived cross-process/cross-camera re-identification store.
 CHROMADB_HOST = os.environ.get("CHROMADB_HOST", "localhost")
