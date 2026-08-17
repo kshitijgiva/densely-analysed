@@ -15,7 +15,8 @@ def _select_device():
 _REPO_ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
 _ANALYTICS_SERVICE_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
 
-VIDEO_SOURCE = os.path.join(_REPO_ROOT, "data", "raw", "samplevideo6.mp4")  # Path to CCTV footage
+LOCAL_VIDEO_DIR = os.path.join(_REPO_ROOT, "data", "raw")  # Local footage the job API may read
+VIDEO_SOURCE = os.path.join(LOCAL_VIDEO_DIR, "samplevideo.mp4")  # Path to CCTV footage
 OUTPUT_CSV = os.path.join(_ANALYTICS_SERVICE_DIR, "results", "analytics_table.csv")  # Output file path
 FRAME_SKIP = 5  # Process every 5th frame for performance
 MIN_CONFIDENCE = 0.5  # Minimum detection confidence

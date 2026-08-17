@@ -19,18 +19,19 @@ import gdown
 from fastapi import FastAPI, HTTPException, status
 from fastapi.encoders import ENCODERS_BY_TYPE
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 SRC_DIR = str(Path(__file__).resolve().parent)
 if SRC_DIR in sys.path:
     sys.path.remove(SRC_DIR)
 sys.path.insert(0, SRC_DIR)
 
-from config import REID_THRESHOLD_SPARSE  # noqa: E402
+from config import LOCAL_VIDEO_DIR, REID_THRESHOLD_SPARSE  # noqa: E402
 
 SAMPLE_FRAMES = 3
 SAMPLE_WINDOW_SECONDS = 10
 RESULTS_DIR = Path(__file__).resolve().parents[1] / "results" / "jobs"
+LOCAL_VIDEO_ROOT = Path(LOCAL_VIDEO_DIR).resolve()
 MAX_WORKERS = int(os.environ.get("ANALYTICS_MAX_WORKERS", "1"))
 
 _IST = ZoneInfo("Asia/Kolkata")
@@ -68,7 +69,15 @@ jobs_lock = threading.Lock()
 
 
 class AnalysisRequest(BaseModel):
-    google_drive_url: str
+    # Exactly one source. google_drive_url is the normal path; local_video skips
+    # the download and reads footage already sitting in data/raw (see
+    # config.LOCAL_VIDEO_DIR) - the same analysis then runs unchanged.
+    google_drive_url: str | None = None
+    local_video: str | None = Field(
+        default=None,
+        description="Filename (or relative path) of a video under data/raw, e.g. "
+        "'samplevideo.mp4'. Mutually exclusive with google_drive_url.",
+    )
     store_id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
     camera_id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
     demographics: bool = True
@@ -95,6 +104,28 @@ class AnalysisRequest(BaseModel):
         "using matching --sample-frames/--sample-window-seconds if footfall still looks "
         "inflated (or reduced) on your footage, and pass the suggested value here.",
     )
+
+    @model_validator(mode="after")
+    def _exactly_one_source(self):
+        if bool(self.google_drive_url) == bool(self.local_video):
+            raise ValueError(
+                "Provide exactly one of 'google_drive_url' or 'local_video'."
+            )
+        return self
+
+
+def _resolve_local_video(name: str) -> Path:
+    """Map a caller-supplied name onto a real file inside data/raw.
+
+    Resolved and re-checked against LOCAL_VIDEO_ROOT so '../../.env'-style
+    input can't turn this into an arbitrary-file-read endpoint.
+    """
+    candidate = (LOCAL_VIDEO_ROOT / name).resolve()
+    if not candidate.is_relative_to(LOCAL_VIDEO_ROOT):
+        raise ValueError(f"local_video must be inside {LOCAL_VIDEO_ROOT}")
+    if not candidate.is_file():
+        raise ValueError(f"No such video: {candidate}")
+    return candidate
 
 
 def _normalize_start_time(start_time: datetime | None) -> datetime | None:
@@ -126,28 +157,43 @@ def _process_job(job_id: str, request: AnalysisRequest) -> None:
     from validate_pipeline import estimate_reid_threshold
 
     temp_dir = Path(tempfile.mkdtemp(prefix=f"cctv-{job_id}-"))
-    input_path = temp_dir / "input_video"
     metrics_path = RESULTS_DIR / f"{job_id}_metrics.json"
 
     try:
-        _update_job(job_id, status="downloading", started_at=datetime.now(timezone.utc))
-        # gdown>=6 always extracts the file ID from share links (fuzzy= removed).
-        try:
-            downloaded = gdown.download(
-                url=request.google_drive_url,
-                output=str(input_path),
-                quiet=False,
-            )
-        except gdown.DownloadError as exc:
-            raise RuntimeError(
-                "Google Drive download failed. Ensure the file is shared as "
-                "'Anyone with the link'."
-            ) from exc
-        if not downloaded or not input_path.exists() or input_path.stat().st_size == 0:
-            raise RuntimeError(
-                "Google Drive download failed. Ensure the file is shared as "
-                "'Anyone with the link'."
-            )
+        _update_job(job_id, started_at=datetime.now(timezone.utc))
+
+        if request.local_video is not None:
+            # Read straight from data/raw. input_path deliberately stays outside
+            # temp_dir so the `finally` cleanup below can't delete the user's
+            # source footage.
+            _update_job(job_id, status="loading_local_video")
+            input_path = _resolve_local_video(request.local_video)
+            source_ref = f"local:{request.local_video}"
+        else:
+            _update_job(job_id, status="downloading")
+            input_path = temp_dir / "input_video"
+            # fuzzy=True is required for the installed gdown (5.x) to extract the file ID
+            # from a /file/d/<id>/view?usp=sharing share link - without it, gdown silently
+            # downloads Google's HTML viewer page instead of the video (still a nonzero-size
+            # "success" by the check below, only failing later at cv2.VideoCapture).
+            try:
+                downloaded = gdown.download(
+                    url=request.google_drive_url,
+                    output=str(input_path),
+                    quiet=False,
+                    fuzzy=True,
+                )
+            except gdown.DownloadError as exc:
+                raise RuntimeError(
+                    "Google Drive download failed. Ensure the file is shared as "
+                    "'Anyone with the link'."
+                ) from exc
+            if not downloaded or not input_path.exists() or input_path.stat().st_size == 0:
+                raise RuntimeError(
+                    "Google Drive download failed. Ensure the file is shared as "
+                    "'Anyone with the link'."
+                )
+            source_ref = request.google_drive_url
 
         RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -198,7 +244,7 @@ def _process_job(job_id: str, request: AnalysisRequest) -> None:
             request.camera_id,
             result["fps"],
             run_start=run_start,
-            camera_url=request.google_drive_url,
+            camera_url=source_ref,
             require_demographics=request.demographics,
         )
 
@@ -256,8 +302,14 @@ def health():
 
 @app.post("/analysis/jobs", status_code=status.HTTP_202_ACCEPTED)
 def create_analysis_job(request: AnalysisRequest):
+    # Reject a bad source now, synchronously, rather than letting the worker
+    # mark the job "failed" a few seconds later.
     try:
-        _validate_google_drive_url(request.google_drive_url)
+        if request.local_video is not None:
+            source = f"local:{_resolve_local_video(request.local_video).name}"
+        else:
+            _validate_google_drive_url(request.google_drive_url)
+            source = request.google_drive_url
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -267,6 +319,7 @@ def create_analysis_job(request: AnalysisRequest):
             "job_id": job_id,
             "status": "queued",
             "created_at": datetime.now(timezone.utc),
+            "source": source,
             "store_id": request.store_id,
             "camera_id": request.camera_id,
             "sampling": (
