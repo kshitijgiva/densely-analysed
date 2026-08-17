@@ -41,7 +41,7 @@ DETECTION_WEIGHTS = os.environ.get("ANALYTICS_DETECTION_WEIGHTS", "yolov8n.pt")
 REID_MODEL_NAME = "osnet_ain_x1_0"
 REID_MODEL_CHECKPOINT = "osnet_ain_x1_0_msmt17.pt"  # msmt17-trained AIN weights, auto-downloaded on first run
 REID_WEIGHTS_DIR = os.path.join(os.path.dirname(__file__), "weights")
-REID_THRESHOLD = 0.92  # Cosine similarity threshold for re-identification, re-tuned for
+REID_THRESHOLD = 0.94  # Cosine similarity threshold for re-identification, re-tuned for
                        # osnet_ain_x1_0/msmt17 via validate_pipeline.py on data/raw/samplevideo6.mp4
                        # (dense, frame-by-frame: same-person p5=0.900, median=0.984; different-person
                        # p95=0.638, median=0.500 - a much cleaner separation than the old
