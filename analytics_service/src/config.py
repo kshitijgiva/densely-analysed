@@ -112,5 +112,39 @@ STATIC_OBJECT_MIN_SPAN_SECONDS = 45          # must persist across this much of 
 STATIC_OBJECT_MAX_DISPLACEMENT_RATIO = 0.03  # foot-point bounding extent / frame diagonal
 STATIC_OBJECT_MIN_APPEARANCES = 4            # need enough samples for a meaningful signal
 
+# Mirror/reflection filtering: off by default, since it needs a MirrorNet
+# checkpoint that isn't vendored here (see vendor/mirrornet/ and
+# mirror_segmentation.py) and hasn't been validated against real store
+# footage yet. A real person standing near a mirror produces two YOLO boxes
+# in the same frame - the identity-merge safeguard in identity.py
+# (match_identity's exclude_ids) exists specifically to stop two
+# simultaneously-visible boxes from merging, which means a reflection can
+# never merge back into the real person's identity and instead mints a new
+# one, inflating footfall. This filters it back out post-hoc: segment each
+# fixed camera's mirror region once (cached), then drop any identity that
+# sits mostly inside that region AND moves in lockstep with a concurrently
+# visible identity mostly outside it. See mirror_segmentation.py /
+# reflection_filter.py.
+MIRROR_FILTER_ENABLED = os.environ.get("ANALYTICS_MIRROR_FILTER", "0") == "1"
+MIRRORNET_WEIGHTS_PATH = os.environ.get(
+    "ANALYTICS_MIRRORNET_WEIGHTS", os.path.join(REID_WEIGHTS_DIR, "MirrorNet.pth")
+)  # download from github.com/Mhaiyang/ICCV2019_MirrorNet - not auto-fetched
+MIRRORNET_INPUT_SCALE = 384  # matches the reference repo's infer.py 'scale'
+MIRROR_MASK_CACHE_DIR = os.path.join(_ANALYTICS_SERVICE_DIR, "cache", "mirror_masks")
+MIRROR_CALIBRATION_FRAMES = 12    # frames sampled to build/verify a camera's mirror ROI once
+MIRROR_MASK_AGG_THRESHOLD = 0.5   # fraction of calibration frames a pixel must read "mirror" in
+MIRROR_MIN_APPEARANCES = 4        # same rationale as STATIC_OBJECT_MIN_APPEARANCES
+MIRROR_OVERLAP_THRESHOLD = 0.6    # mean bbox-inside-mirror-mask overlap to flag a reflection candidate
+MIRROR_REAL_OVERLAP_MAX = 0.2     # the real counterpart must sit mostly outside the mirror
+MIRROR_APPEARANCE_SIMILARITY_THRESHOLD = 0.75  # looser than REID_THRESHOLD - mirror glass
+                                                # distorts color/texture enough that a reflection's
+                                                # OSNet embedding often won't clear the merge bar
+MIRROR_MOTION_CORRELATION_THRESHOLD = 0.5      # foot-point displacement correlation, real vs candidate
+MIRROR_MIN_SHARED_FRAMES = 3                   # frames both identities must co-appear in to compare motion
+# None of the MIRROR_* thresholds above have been validated against real
+# footage with a known mirror (no such clip exists in data/raw/ yet) - treat
+# them as initial heuristic defaults to re-tune once one is collected, the
+# same way STATIC_OBJECT_* above still needs real-footage validation.
+
 VERTEX_PROJECT_ID = "visual-similarity-459311"
 VERTEX_PROJECT_LOCATION = "us-central1"

@@ -30,7 +30,7 @@ import time
 
 import cv2
 
-from config import VIDEO_SOURCE, REID_THRESHOLD, MIN_DEMOGRAPHICS_CONFIDENCE
+from config import VIDEO_SOURCE, REID_THRESHOLD, MIN_DEMOGRAPHICS_CONFIDENCE, MIRROR_FILTER_ENABLED
 from detection import load_detection_model, detect_people
 from reid import OSNetReID
 from identity import (
@@ -43,6 +43,8 @@ from utils import draw_boxes
 from validate_pipeline import percentiles, collect_similarity_pairs
 from heatmap import HeatmapAccumulator, build_accumulator_from_detections, render_heatmap
 from static_objects import compute_static_identity_ids
+from mirror_segmentation import get_or_build_mirror_mask
+from reflection_filter import compute_reflection_identity_ids
 import metrics_store
 
 
@@ -52,7 +54,7 @@ def run(video_source, output_path, max_frames, metrics_out_path,
         sample_frames=0, sample_window_seconds=10, write_video=True,
         reid_threshold=REID_THRESHOLD,
         start_frame=0, segment_label=None, log_history=True,
-        heatmap_hex_size=40):
+        heatmap_hex_size=40, mirror_filter_enabled=MIRROR_FILTER_ENABLED):
     """reid_threshold defaults to the config value, which was tuned on dense,
     frame-by-frame footage (see validate_pipeline.py) where consecutive
     same-person appearances are captured a fraction of a second apart. When
@@ -91,13 +93,20 @@ def run(video_source, output_path, max_frames, metrics_out_path,
     if not cap.isOpened():
         raise FileNotFoundError(f"Could not open video source: {video_source}")
 
-    if start_frame:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-
     fps = cap.get(cv2.CAP_PROP_FPS) or 25
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    mirror_mask, mirror_mask_meta = (None, {"enabled": False})
+    if mirror_filter_enabled:
+        mirror_mask, mirror_mask_meta = get_or_build_mirror_mask(
+            cap, camera_id, width, height, start_frame, total_frames
+        )
+
+    # Unconditional: calibration above (when it runs) seeks all over the
+    # video, so this must re-seek even when start_frame is 0.
+    cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
 
     sample_interval = 1.0
     output_fps = fps
@@ -351,6 +360,32 @@ def run(video_source, output_path, max_frames, metrics_out_path,
             f"likely mannequin/poster/screen - identity ids: {sorted(static_identity_ids)}"
         )
 
+    reflection_identity_ids = set()
+    if mirror_filter_enabled and mirror_mask is not None:
+        reflection_identity_ids = compute_reflection_identity_ids(
+            track_id_to_identity, detections_log, identities, mirror_mask, width, height, fps
+        )
+        if reflection_identity_ids:
+            excluded_track_ids = {
+                tid for tid, iid in track_id_to_identity.items() if iid in reflection_identity_ids
+            }
+            new_identity_count -= sum(
+                1 for iid in reflection_identity_ids if identities[iid]._was_new
+            )
+            for iid in reflection_identity_ids:
+                identities.pop(iid, None)
+            detections_log = [e for e in detections_log if e[1] not in excluded_track_ids]
+            track_stats = {
+                tid: s for tid, s in track_stats.items() if tid not in excluded_track_ids
+            }
+            heatmap_acc = build_accumulator_from_detections(
+                detections_log, width, height, hex_size=heatmap_acc.hex_size
+            )
+            print(
+                f"Filtered {len(reflection_identity_ids)} likely mirror-reflection detection(s) - "
+                f"identity ids: {sorted(reflection_identity_ids)}"
+            )
+
     if chroma is not None:
         for identity in identities.values():
             representative = identity.representative_embedding()
@@ -424,6 +459,9 @@ def run(video_source, output_path, max_frames, metrics_out_path,
         "filtering": {
             "static_objects_removed": len(static_identity_ids),
             "removed_identity_ids": sorted(static_identity_ids),
+            "mirror_mask": mirror_mask_meta,
+            "mirror_reflections_removed": len(reflection_identity_ids),
+            "mirror_reflection_identity_ids": sorted(reflection_identity_ids),
         },
         "heatmap": {
             "hex_size": heatmap_acc.hex_size,
@@ -530,6 +568,12 @@ if __name__ == "__main__":
     parser.add_argument("--heatmap-hex-size", type=int, default=40,
                          help="Circumradius in pixels of each hex cell in the foot-traffic "
                               "heatmap (smaller = finer-grained). Default: 40")
+    parser.add_argument("--mirror-filter", action="store_true", default=MIRROR_FILTER_ENABLED,
+                         help="Filter out tracked people that are mirror reflections of a "
+                              "concurrently-visible real person (see mirror_segmentation.py, "
+                              "reflection_filter.py). Requires ANALYTICS_MIRRORNET_WEIGHTS to "
+                              "point at a downloaded MirrorNet.pth checkpoint (not vendored in "
+                              "this repo). Defaults to $ANALYTICS_MIRROR_FILTER.")
     args = parser.parse_args()
 
     output_path = os.path.normpath(args.output)
@@ -552,7 +596,8 @@ if __name__ == "__main__":
                  start_frame=args.start_frame,
                  segment_label=args.segment_label,
                  log_history=not args.no_history,
-                 heatmap_hex_size=args.heatmap_hex_size)
+                 heatmap_hex_size=args.heatmap_hex_size,
+                 mirror_filter_enabled=args.mirror_filter)
 
     if args.persist:
         from datetime import datetime, timedelta, timezone
